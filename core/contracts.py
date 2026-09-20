@@ -76,6 +76,9 @@ class MarketState(Contract):
     news_known: bool
     news_checked_at: AwareDatetime
     high_impact_events: tuple[AwareDatetime, ...] = ()
+    bid: Positive | None = None
+    ask: Positive | None = None
+    source: str = 'ctrader'
 
 class PropRules(Contract):
     # Generic simulation profile, NOT certified FTMO rules.

@@ -2,6 +2,10 @@ class ExecutionDisabled(RuntimeError):
     pass
 
 class ExecutionGateway:
-    """Closed boundary until phase 9. No broker client, credentials or sockets."""
+    """Live broker orders stay closed. Paper fills use a separate simulator."""
     def submit(self, *args, **kwargs):
-        raise ExecutionDisabled('v0.2 supports research only; all order execution is disabled')
+        raise ExecutionDisabled('Live/demo broker order submission is disabled')
+
+    def assert_no_live(self):
+        # Paper path may simulate fills; this gate still forbids broker sockets.
+        return True

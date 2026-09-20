@@ -26,5 +26,6 @@ def test_providers_report_without_secrets():
     status=ctrader.status(s)
     assert status['execution_enabled'] is False
     assert status['orders']=='disabled'
+    assert status['market_data']=='principal'
     assert '40796_id' in status['authorization_url']
     assert 'secret' not in str(status)

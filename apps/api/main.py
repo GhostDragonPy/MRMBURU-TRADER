@@ -13,7 +13,10 @@ from core.database import session_factory
 from core.models import Account, AccountSnapshot, AuditEvent, KillSwitch, RiskDecisionRecord, StrategyVersion
 from services.ai_engine import deepseek
 from services.ctrader import client as ctrader
+from services.ctrader.feed import feed_from_settings
+from services.ctrader.types import CTraderAuthRequired, CTraderUnavailable
 from services.market_data import fred
+from services.pipeline import paper as paper_pipeline
 from services.risk_engine.service import Conflict, NotFound, evaluate_scenario, set_kill_switch
 from services.strategy_engine.engine import Candle, SmaConfig, SmaCross
 
@@ -45,8 +48,15 @@ class AiProposeRequest(Contract):
     timeframe: str = Field(default='M15', min_length=1, max_length=16)
     quantity: Positive = Field(default='1')
     value_per_price_unit: Positive = Field(default='1')
-    include_quote: bool = True
     context: dict = Field(default_factory=dict)
+
+class PaperRunRequest(Contract):
+    request_key: str = Field(min_length=1, max_length=128)
+    symbol: str = Field(min_length=1, max_length=32)
+    timeframe: str = Field(default='M15', min_length=1, max_length=16)
+    quantity: Positive = Field(default='1')
+    value_per_price_unit: Positive = Field(default='1')
+    include_ai: bool = False
 
 
 def create_app(settings=None, factory=None, redis_client=None):
@@ -120,8 +130,10 @@ def create_app(settings=None, factory=None, redis_client=None):
             'execution_enabled':False,
             'kill_switch':gate is None or gate.active,
             'ai':'deepseek' if deepseek.configured(settings) else None,
-            'market_data':'fred' if fred.configured(settings) else None,
+            'macro':'fred' if fred.configured(settings) else None,
+            'market_data':'ctrader',
             'ctrader_configured': ctrader.configured(settings),
+            'ctrader_authorized': bool(ctrader.access_token(settings)),
         }
 
     @app.post('/accounts', dependencies=[Depends(admin)], status_code=201)
@@ -166,10 +178,11 @@ def create_app(settings=None, factory=None, redis_client=None):
     @app.get('/research/providers', dependencies=[Depends(research)])
     def providers():
         return {
-            'ai': {'provider': 'deepseek', 'configured': deepseek.configured(settings)},
-            'market_data': {'provider': 'fred', 'configured': fred.configured(settings)},
-            'ctrader': ctrader.status(settings),
+            'ai': {'provider': 'deepseek', 'configured': deepseek.configured(settings), 'role': 'advisory'},
+            'macro': {'provider': 'fred', 'configured': fred.configured(settings), 'prices': False},
+            'market_data': ctrader.status(settings),
             'execution_enabled': False,
+            'paper_pipeline': ['ctrader', 'strategy', 'risk', 'paper_fill', 'journal'],
         }
 
     @app.get('/research/ai/health', dependencies=[Depends(research)])
@@ -182,13 +195,12 @@ def create_app(settings=None, factory=None, redis_client=None):
     @app.post('/research/ai/propose', dependencies=[Depends(research)])
     def ai_propose(body:AiProposeRequest):
         quote = None
-        if body.include_quote:
-            try:
-                quote = fred.quote(settings, body.symbol)
-            except fred.FredUnavailable:
-                quote = None
         try:
-            return deepseek.propose(
+            quote = feed_from_settings(settings).tick(body.symbol).model_dump(mode='json')
+        except (CTraderAuthRequired, CTraderUnavailable):
+            quote = None
+        try:
+            proposal = deepseek.propose(
                 settings,
                 symbol=body.symbol,
                 timeframe=body.timeframe,
@@ -196,27 +208,94 @@ def create_app(settings=None, factory=None, redis_client=None):
                 value_per_price_unit=body.value_per_price_unit,
                 quote=quote,
                 context=body.context,
-            ) | {'quote': quote}
+            )
         except (deepseek.DeepSeekUnavailable, ValueError) as exc:
             raise HTTPException(422 if isinstance(exc, ValueError) else 503, str(exc)) from None
+        return proposal | {
+            'quote': quote,
+            'price_source': 'ctrader' if quote else None,
+            'risk_override': 'risk_engine_is_final',
+            'executable': False,
+        }
 
-    @app.get('/research/market/quote', dependencies=[Depends(research)])
-    def market_quote(symbol: str):
+    @app.get('/research/macro/series', dependencies=[Depends(research)])
+    def macro_series(symbol: str):
         try:
-            return fred.quote(settings, symbol)
+            return fred.quote(settings, symbol) | {'usage': 'macro_only', 'not_for_signals': True}
         except fred.FredUnavailable as exc:
             raise HTTPException(503, str(exc)) from None
 
-    @app.get('/research/market/calendar', dependencies=[Depends(research)])
-    def market_calendar():
+    @app.get('/research/macro/calendar', dependencies=[Depends(research)])
+    def macro_calendar():
         try:
-            return fred.calendar(settings)
+            return fred.calendar(settings) | {'usage': 'macro_only'}
         except fred.FredUnavailable as exc:
             raise HTTPException(503, str(exc)) from None
 
-    @app.get('/research/ctrader/status', dependencies=[Depends(research)])
+    def _feed():
+        try:
+            return feed_from_settings(settings)
+        except CTraderAuthRequired as exc:
+            raise HTTPException(401, str(exc)) from None
+        except CTraderUnavailable as exc:
+            raise HTTPException(503, str(exc)) from None
+
+    @app.get('/market/ctrader/status', dependencies=[Depends(research)])
     def ctrader_status():
         return ctrader.status(settings)
+
+    @app.get('/market/ctrader/symbols', dependencies=[Depends(research)])
+    def ctrader_symbols():
+        return [row.model_dump(mode='json') for row in _feed().symbols()]
+
+    @app.get('/market/ctrader/quote', dependencies=[Depends(research)])
+    def ctrader_quote(symbol: str):
+        return _feed().tick(symbol).model_dump(mode='json')
+
+    @app.get('/market/ctrader/ohlc', dependencies=[Depends(research)])
+    def ctrader_ohlc(symbol: str, timeframe: str = 'M15', count: int = 100):
+        return [row.model_dump(mode='json') for row in _feed().ohlc(symbol, timeframe, count)]
+
+    @app.get('/market/ctrader/account', dependencies=[Depends(research)])
+    def ctrader_account():
+        return _feed().account().model_dump(mode='json')
+
+    @app.get('/market/ctrader/positions', dependencies=[Depends(research)])
+    def ctrader_positions():
+        return [row.model_dump(mode='json') for row in _feed().positions()]
+
+    @app.post('/paper/accounts/{account_id}/run', dependencies=[Depends(research)])
+    def paper_run(account_id:str, body:PaperRunRequest, s=Depends(db)):
+        feed = _feed()
+        ai_opinion = None
+        if body.include_ai:
+            try:
+                tick = feed.tick(body.symbol)
+                ai_opinion = deepseek.propose(
+                    settings, symbol=body.symbol, timeframe=body.timeframe,
+                    quantity=body.quantity, value_per_price_unit=body.value_per_price_unit,
+                    quote=tick.model_dump(mode='json'),
+                )
+            except deepseek.DeepSeekUnavailable:
+                ai_opinion = {'available': False}
+        try:
+            return paper_pipeline.run(
+                s, feed, account_id=account_id, request_key=body.request_key,
+                symbol=body.symbol, timeframe=body.timeframe,
+                quantity=body.quantity, value_per_price_unit=body.value_per_price_unit,
+                ai_opinion=ai_opinion,
+            )
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+
+    @app.get('/journal', dependencies=[Depends(research)])
+    def journal_list(s=Depends(db)):
+        from core.models import JournalEntry
+        rows = s.scalars(select(JournalEntry).order_by(JournalEntry.opened_at.desc()).limit(100))
+        return [{'id': r.id, 'account_id': r.account_id, 'signal_id': r.signal_id,
+                 'outcome': r.outcome, 'rule_compliant': r.rule_compliant,
+                 'entry_reason': r.entry_reason, 'exit_reason': r.exit_reason,
+                 'trade_context': r.trade_context} for r in rows]
 
     @app.post('/research/strategies/sma/signal', dependencies=[Depends(research)])
     def generate(body:StrategyRequest):

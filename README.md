@@ -58,7 +58,10 @@ No ejecutar `docker compose down -v` salvo que se quiera eliminar los datos loca
 - Registro de señales, decisiones, políticas usadas, contexto y acciones de control.
 - Kill Switch persistente por API/CLI; ausencia del control implica bloqueo.
 - CI con pruebas unitarias/API, migraciones PostgreSQL y arranque Docker.
-- IA de investigación DeepSeek (`POST /research/ai/propose`); series FRED; cTrader OAuth configurado **sin envío de órdenes**.
+- IA de investigación DeepSeek (asesora, nunca veta al Risk Engine).
+- FRED solo para macro/calendario; **no** para precios de señales.
+- cTrader como market data principal (bid/ask, OHLC, spreads, símbolos, posiciones, balance/equity) **sin órdenes**.
+- Pipeline paper: cTrader → Strategy Engine → Risk Engine → paper fill → Trade Journal.
 
 ## Probar el flujo
 

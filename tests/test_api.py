@@ -42,6 +42,11 @@ def test_health_and_auth(client):
     assert root['docs'] == '/docs'
     assert client.get('/health').json()['execution_enabled'] is False
     assert client.get('/ready').status_code==200
+    providers=client.get('/research/providers',headers={'x-api-key':RESEARCH}).json()
+    assert providers['macro']['provider']=='fred'
+    assert providers['macro']['prices'] is False
+    assert providers['market_data']['provider']=='ctrader'
+    assert client.get('/market/ctrader/quote',headers={'x-api-key':RESEARCH},params={'symbol':'EURUSD'}).status_code==401
     assert client.get('/accounts').status_code==401
     assert client.post('/control/resume-paper',headers={'x-api-key':RESEARCH},json={'reason':'bypass'}).status_code==401
     assert client.post('/accounts',headers={'x-api-key':RESEARCH},json={}).status_code==401

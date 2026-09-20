@@ -28,11 +28,18 @@ def test_mode_locked(mode):
 def test_execution_env_locked():
     with pytest.raises(ValidationError):settings(execution_enabled=True)
 
+def test_execution_enabled_coerces_false_string():
+    s = settings(execution_enabled='false')
+    assert s.execution_enabled is False
+
 def test_secret_keys_distinct():
     with pytest.raises(ValidationError):
         Settings(_env_file=None,postgres_password='p'*32,admin_api_key=ADMIN,research_api_key=ADMIN)
 
 def test_health_and_auth(client):
+    root = client.get('/').json()
+    assert root['service'] == 'MRMBURU TRADER'
+    assert root['docs'] == '/docs'
     assert client.get('/health').json()['execution_enabled'] is False
     assert client.get('/ready').status_code==200
     assert client.get('/accounts').status_code==401

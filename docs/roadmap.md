@@ -2,7 +2,7 @@
 
 | Fase | Estado / siguiente entrega |
 |---|---|
-| 1 Infraestructura | Base y CI preparados; despliegue Docker en Linux por verificar |
+| 1 Infraestructura | Base, CI y Docker paper en Linux verificados (`trader.acshop.shop`) |
 | 2 Base de datos | Migración 0001, modelos, auditoría; prueba PostgreSQL en CI |
 | 3 Strategy Engine | Contratos y SMA de referencia; siguiente DSL y versiones inmutables |
 | 4 Backtesting | Pendiente: fills next-bar, comisiones/spread/slippage, datos sin sesgo, métricas |

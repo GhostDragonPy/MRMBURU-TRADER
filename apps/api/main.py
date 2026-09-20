@@ -72,6 +72,20 @@ def create_app(settings=None, factory=None, redis_client=None):
         except Conflict as e:
             raise HTTPException(409, str(e)) from None
 
+    @app.get('/')
+    def root():
+        # Avoid bare FastAPI {"detail":"Not Found"} on the public host root.
+        return {
+            'service': 'MRMBURU TRADER',
+            'version': '0.2.0',
+            'mode': 'paper',
+            'execution_enabled': False,
+            'health': '/health',
+            'ready': '/ready',
+            'docs': '/docs',
+            'openapi': '/openapi.json',
+        }
+
     @app.get('/health')
     def health():
         return {'status':'ok','mode':'paper','execution_enabled':False,'version':'0.2.0'}

@@ -17,8 +17,12 @@ curl --fail http://127.0.0.1:8000/ready
 `init_env.py` crea `.env` con claves aleatorias y permisos 0600; no lo sobrescribe.
 No reutilizar el `.env` de v0.1: ahora se separan claves de administrador e investigación.
 PostgreSQL y Redis no publican puertos. La API escucha en `127.0.0.1:8000`.
-OpenAPI: `http://127.0.0.1:8000/docs`. Las rutas de datos/control requieren `X-API-Key`.
+Raíz `/` (JSON con enlaces), liveness `/health`, readiness `/ready`, OpenAPI `/docs`.
+Las rutas de datos/control requieren `X-API-Key`.
 El archivo `.env` nunca se incorpora al repositorio ni a la imagen Docker.
+
+Producción (este host): Caddy termina TLS en `https://trader.acshop.shop` y hace
+proxy a `127.0.0.1:8000`. Plantilla: `deploy/Caddyfile.trader.acshop.shop`.
 
 ### Detener / reanudar evaluación paper
 

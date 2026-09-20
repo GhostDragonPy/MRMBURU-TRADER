@@ -10,7 +10,7 @@ content=('APP_ENV=development\nTRADING_MODE=paper\nEXECUTION_ENABLED=false\n'
          f'ADMIN_API_KEY={secrets.token_urlsafe(36)}\n'
          f'RESEARCH_API_KEY={secrets.token_urlsafe(36)}\n'
          'REDIS_URL=redis://redis:6379/0\n'
-         'DEEPSEEK_API_KEY=\nFMP_API_KEY=\nCTRADER_CLIENT_ID=\nCTRADER_CLIENT_SECRET=\n'
+         'DEEPSEEK_API_KEY=\nFRED_API_KEY=\nCTRADER_CLIENT_ID=\nCTRADER_CLIENT_SECRET=\n'
          'CTRADER_REDIRECT_URI=https://trader.acshop.shop/research/ctrader/callback\n')
 try:
     fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)

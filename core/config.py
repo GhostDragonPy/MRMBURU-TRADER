@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     admin_api_key: SecretStr
     research_api_key: SecretStr
     deepseek_api_key: Optional[SecretStr] = None
-    fmp_api_key: Optional[SecretStr] = None
+    fred_api_key: Optional[SecretStr] = None
     ctrader_client_id: Optional[SecretStr] = None
     ctrader_client_secret: Optional[SecretStr] = None
     ctrader_redirect_uri: str = 'https://trader.acshop.shop/research/ctrader/callback'
@@ -30,7 +30,7 @@ class Settings(BaseSettings):
             return False
         return value
 
-    @field_validator('deepseek_api_key', 'fmp_api_key', 'ctrader_client_id', 'ctrader_client_secret', mode='before')
+    @field_validator('deepseek_api_key', 'fred_api_key', 'ctrader_client_id', 'ctrader_client_secret', mode='before')
     @classmethod
     def empty_secret_is_none(cls, value):
         if value is None or (isinstance(value, str) and not value.strip()):

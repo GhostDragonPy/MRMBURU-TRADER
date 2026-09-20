@@ -13,7 +13,7 @@ from core.database import session_factory
 from core.models import Account, AccountSnapshot, AuditEvent, KillSwitch, RiskDecisionRecord, StrategyVersion
 from services.ai_engine import deepseek
 from services.ctrader import client as ctrader
-from services.market_data import fmp
+from services.market_data import fred
 from services.risk_engine.service import Conflict, NotFound, evaluate_scenario, set_kill_switch
 from services.strategy_engine.engine import Candle, SmaConfig, SmaCross
 
@@ -120,7 +120,7 @@ def create_app(settings=None, factory=None, redis_client=None):
             'execution_enabled':False,
             'kill_switch':gate is None or gate.active,
             'ai':'deepseek' if deepseek.configured(settings) else None,
-            'market_data':'fmp' if fmp.configured(settings) else None,
+            'market_data':'fred' if fred.configured(settings) else None,
             'ctrader_configured': ctrader.configured(settings),
         }
 
@@ -167,7 +167,7 @@ def create_app(settings=None, factory=None, redis_client=None):
     def providers():
         return {
             'ai': {'provider': 'deepseek', 'configured': deepseek.configured(settings)},
-            'market_data': {'provider': 'fmp', 'configured': fmp.configured(settings)},
+            'market_data': {'provider': 'fred', 'configured': fred.configured(settings)},
             'ctrader': ctrader.status(settings),
             'execution_enabled': False,
         }
@@ -184,8 +184,8 @@ def create_app(settings=None, factory=None, redis_client=None):
         quote = None
         if body.include_quote:
             try:
-                quote = fmp.quote(settings, body.symbol)
-            except fmp.FmpUnavailable:
+                quote = fred.quote(settings, body.symbol)
+            except fred.FredUnavailable:
                 quote = None
         try:
             return deepseek.propose(
@@ -203,15 +203,15 @@ def create_app(settings=None, factory=None, redis_client=None):
     @app.get('/research/market/quote', dependencies=[Depends(research)])
     def market_quote(symbol: str):
         try:
-            return fmp.quote(settings, symbol)
-        except fmp.FmpUnavailable as exc:
+            return fred.quote(settings, symbol)
+        except fred.FredUnavailable as exc:
             raise HTTPException(503, str(exc)) from None
 
     @app.get('/research/market/calendar', dependencies=[Depends(research)])
     def market_calendar():
         try:
-            return fmp.calendar(settings)
-        except fmp.FmpUnavailable as exc:
+            return fred.calendar(settings)
+        except fred.FredUnavailable as exc:
             raise HTTPException(503, str(exc)) from None
 
     @app.get('/research/ctrader/status', dependencies=[Depends(research)])

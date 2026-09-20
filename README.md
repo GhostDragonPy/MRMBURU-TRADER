@@ -58,6 +58,7 @@ No ejecutar `docker compose down -v` salvo que se quiera eliminar los datos loca
 - Registro de señales, decisiones, políticas usadas, contexto y acciones de control.
 - Kill Switch persistente por API/CLI; ausencia del control implica bloqueo.
 - CI con pruebas unitarias/API, migraciones PostgreSQL y arranque Docker.
+- IA de investigación DeepSeek (`POST /research/ai/propose`); datos FMP; cTrader OAuth configurado **sin envío de órdenes**.
 
 ## Probar el flujo
 

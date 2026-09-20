@@ -11,6 +11,9 @@ from core.config import get_settings
 from core.contracts import Contract, AccountState, MarketState, PropRules, RiskPolicy, Signal, Positive
 from core.database import session_factory
 from core.models import Account, AccountSnapshot, AuditEvent, KillSwitch, RiskDecisionRecord, StrategyVersion
+from services.ai_engine import deepseek
+from services.ctrader import client as ctrader
+from services.market_data import fmp
 from services.risk_engine.service import Conflict, NotFound, evaluate_scenario, set_kill_switch
 from services.strategy_engine.engine import Candle, SmaConfig, SmaCross
 
@@ -36,6 +39,14 @@ class StrategyRequest(Contract):
     timeframe: str = Field(min_length=1, max_length=16)
     quantity: Positive
     value_per_price_unit: Positive
+
+class AiProposeRequest(Contract):
+    symbol: str = Field(min_length=1, max_length=32)
+    timeframe: str = Field(default='M15', min_length=1, max_length=16)
+    quantity: Positive = Field(default='1')
+    value_per_price_unit: Positive = Field(default='1')
+    include_quote: bool = True
+    context: dict = Field(default_factory=dict)
 
 
 def create_app(settings=None, factory=None, redis_client=None):
@@ -104,7 +115,14 @@ def create_app(settings=None, factory=None, redis_client=None):
     @app.get('/status', dependencies=[Depends(research)])
     def status(s=Depends(db)):
         gate=s.get(KillSwitch,1)
-        return {'mode':'paper','execution_enabled':False,'kill_switch':gate is None or gate.active}
+        return {
+            'mode':'paper',
+            'execution_enabled':False,
+            'kill_switch':gate is None or gate.active,
+            'ai':'deepseek' if deepseek.configured(settings) else None,
+            'market_data':'fmp' if fmp.configured(settings) else None,
+            'ctrader_configured': ctrader.configured(settings),
+        }
 
     @app.post('/accounts', dependencies=[Depends(admin)], status_code=201)
     def add_account(body:CreateAccount,s=Depends(db)):
@@ -144,6 +162,61 @@ def create_app(settings=None, factory=None, redis_client=None):
     def decisions(s=Depends(db)):
         return [r.result for r in s.scalars(select(RiskDecisionRecord).order_by(
             RiskDecisionRecord.created_at.desc()).limit(100))]
+
+    @app.get('/research/providers', dependencies=[Depends(research)])
+    def providers():
+        return {
+            'ai': {'provider': 'deepseek', 'configured': deepseek.configured(settings)},
+            'market_data': {'provider': 'fmp', 'configured': fmp.configured(settings)},
+            'ctrader': ctrader.status(settings),
+            'execution_enabled': False,
+        }
+
+    @app.get('/research/ai/health', dependencies=[Depends(research)])
+    def ai_health():
+        try:
+            return deepseek.ping(settings)
+        except deepseek.DeepSeekUnavailable as exc:
+            raise HTTPException(503, str(exc)) from None
+
+    @app.post('/research/ai/propose', dependencies=[Depends(research)])
+    def ai_propose(body:AiProposeRequest):
+        quote = None
+        if body.include_quote:
+            try:
+                quote = fmp.quote(settings, body.symbol)
+            except fmp.FmpUnavailable:
+                quote = None
+        try:
+            return deepseek.propose(
+                settings,
+                symbol=body.symbol,
+                timeframe=body.timeframe,
+                quantity=body.quantity,
+                value_per_price_unit=body.value_per_price_unit,
+                quote=quote,
+                context=body.context,
+            ) | {'quote': quote}
+        except (deepseek.DeepSeekUnavailable, ValueError) as exc:
+            raise HTTPException(422 if isinstance(exc, ValueError) else 503, str(exc)) from None
+
+    @app.get('/research/market/quote', dependencies=[Depends(research)])
+    def market_quote(symbol: str):
+        try:
+            return fmp.quote(settings, symbol)
+        except fmp.FmpUnavailable as exc:
+            raise HTTPException(503, str(exc)) from None
+
+    @app.get('/research/market/calendar', dependencies=[Depends(research)])
+    def market_calendar():
+        try:
+            return fmp.calendar(settings)
+        except fmp.FmpUnavailable as exc:
+            raise HTTPException(503, str(exc)) from None
+
+    @app.get('/research/ctrader/status', dependencies=[Depends(research)])
+    def ctrader_status():
+        return ctrader.status(settings)
 
     @app.post('/research/strategies/sma/signal', dependencies=[Depends(research)])
     def generate(body:StrategyRequest):

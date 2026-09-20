@@ -1,0 +1,76 @@
+name: mrmburu-trader
+x-app: &app
+  build: .
+  env_file: .env
+  init: true
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  networks: [backend]
+  logging:
+    driver: json-file
+    options: {max-size: 10m, max-file: '3'}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?Run scripts/init_env.py}
+      POSTGRES_USER: ${POSTGRES_USER:?Run scripts/init_env.py}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run scripts/init_env.py}
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    networks: [backend]
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  redis:
+    image: redis:7-alpine
+    command: [redis-server, --appendonly, 'yes']
+    volumes: [redis_data:/data]
+    networks: [backend]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  migrate:
+    <<: *app
+    command: [python, -m, alembic, upgrade, head]
+    depends_on:
+      postgres: {condition: service_healthy}
+    restart: 'no'
+  api:
+    <<: *app
+    ports: ['127.0.0.1:8000:8000']
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready',timeout=4)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+  worker:
+    <<: *app
+    command: [python, -m, apps.worker.main]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, python, -c, "import os,redis; r=redis.Redis.from_url(os.environ['REDIS_URL']); assert r.exists('worker:heartbeat')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+networks:
+  backend:
+    internal: true
+volumes:
+  postgres_data:
+  redis_data:

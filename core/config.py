@@ -1,6 +1,6 @@
 from functools import lru_cache
 from typing import Literal
-from pydantic import SecretStr, model_validator
+from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import URL
 
@@ -16,6 +16,14 @@ class Settings(BaseSettings):
     redis_url: str = 'redis://redis:6379/0'
     admin_api_key: SecretStr
     research_api_key: SecretStr
+
+    @field_validator('execution_enabled', mode='before')
+    @classmethod
+    def coerce_execution_enabled(cls, value):
+        # Env vars arrive as strings; Literal[False] rejects "false" without coercion.
+        if isinstance(value, str) and value.strip().lower() in {'false', '0', 'no', 'off', ''}:
+            return False
+        return value
 
     @model_validator(mode='after')
     def validate_keys(self):

@@ -15,14 +15,18 @@ PERIODS = {
 class LiveCTraderFeed:
     """Read-only cTrader Open API adapter. Never places orders."""
 
-    def __init__(self, settings, account_id=None):
+    def __init__(self, settings, account_id=None, redis_client=None):
         self.settings = settings
         self.account_id = account_id or settings.ctrader_account_id
+        self.redis_client = redis_client
+
+    def _get(self, path, params=None):
+        return auth.api_get(self.settings, path, params, redis_client=self.redis_client)
 
     def _require_account(self):
         if self.account_id:
             return self.account_id
-        rows = auth.api_get(self.settings, '/tradingaccounts')
+        rows = self._get('/tradingaccounts')
         items = rows if isinstance(rows, list) else rows.get('data') or rows.get('accounts') or []
         if not items:
             raise CTraderUnavailable('No cTrader trading accounts returned')
@@ -32,7 +36,7 @@ class LiveCTraderFeed:
 
     def symbols(self) -> list[SymbolInfo]:
         account = self._require_account()
-        rows = auth.api_get(self.settings, f'/tradingaccounts/{account}/symbols')
+        rows = self._get(f'/tradingaccounts/{account}/symbols')
         items = rows if isinstance(rows, list) else rows.get('data') or rows.get('symbols') or []
         out = []
         for row in items:
@@ -49,7 +53,7 @@ class LiveCTraderFeed:
 
     def tick(self, symbol: str) -> Tick:
         account = self._require_account()
-        row = auth.api_get(self.settings, f'/tradingaccounts/{account}/symbols/{symbol}/tick')
+        row = self._get(f'/tradingaccounts/{account}/symbols/{symbol}/tick')
         data = row.get('data', row)
         bid = Decimal(str(data.get('bid') or data.get('bestBid') or data.get('bidPrice')))
         ask = Decimal(str(data.get('ask') or data.get('bestAsk') or data.get('askPrice')))
@@ -61,7 +65,7 @@ class LiveCTraderFeed:
         period = PERIODS.get(timeframe.upper())
         if period is None:
             raise CTraderUnavailable(f'Unsupported timeframe {timeframe}')
-        rows = auth.api_get(self.settings, f'/tradingaccounts/{account}/symbols/{symbol}/trendbars',
+        rows = self._get(f'/tradingaccounts/{account}/symbols/{symbol}/trendbars',
                             {'period': period, 'count': count})
         items = rows if isinstance(rows, list) else rows.get('data') or rows.get('trendbars') or []
         bars = []
@@ -81,7 +85,7 @@ class LiveCTraderFeed:
 
     def positions(self) -> list[Position]:
         account = self._require_account()
-        rows = auth.api_get(self.settings, f'/tradingaccounts/{account}/positions')
+        rows = self._get(f'/tradingaccounts/{account}/positions')
         items = rows if isinstance(rows, list) else rows.get('data') or rows.get('positions') or []
         out = []
         for row in items:
@@ -104,7 +108,7 @@ class LiveCTraderFeed:
 
     def account(self) -> AccountSnapshot:
         account = self._require_account()
-        row = auth.api_get(self.settings, f'/tradingaccounts/{account}')
+        row = self._get(f'/tradingaccounts/{account}')
         data = row.get('data', row)
         now = datetime.now(timezone.utc)
         return AccountSnapshot(
@@ -116,7 +120,7 @@ class LiveCTraderFeed:
         )
 
 
-def feed_from_settings(settings):
-    if not auth.access_token(settings):
+def feed_from_settings(settings, redis_client=None):
+    if not auth.access_token(settings, redis_client):
         raise CTraderAuthRequired('cTrader access token missing; complete OAuth before using market data')
-    return LiveCTraderFeed(settings)
+    return LiveCTraderFeed(settings, redis_client=redis_client)

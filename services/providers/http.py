@@ -25,3 +25,19 @@ def request_json(url, *, method='GET', headers=None, payload=None, timeout=20):
         raise ProviderError(f'{exc.code} {url.split("?")[0]}: {detail}') from exc
     except urllib.error.URLError as exc:
         raise ProviderError(f'Unreachable {url}: {exc.reason}') from exc
+
+
+def request_form(url, fields, *, timeout=20):
+    data = urllib.parse.urlencode(fields).encode()
+    req = urllib.request.Request(url, data=data, method='POST')
+    req.add_header('Accept', 'application/json')
+    req.add_header('Content-Type', 'application/x-www-form-urlencoded')
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            body = response.read().decode()
+            return json.loads(body) if body else {}
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode(errors='ignore')[:300]
+        raise ProviderError(f'{exc.code} {url.split("?")[0]}: {detail}') from exc
+    except urllib.error.URLError as exc:
+        raise ProviderError(f'Unreachable {url}: {exc.reason}') from exc

@@ -3,6 +3,7 @@ from hmac import compare_digest
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from fastapi import FastAPI, Depends, Header, HTTPException
+from fastapi.responses import HTMLResponse
 from pydantic import Field
 from redis import Redis
 from sqlalchemy import select, text
@@ -133,7 +134,7 @@ def create_app(settings=None, factory=None, redis_client=None):
             'macro':'fred' if fred.configured(settings) else None,
             'market_data':'ctrader',
             'ctrader_configured': ctrader.configured(settings),
-            'ctrader_authorized': bool(ctrader.access_token(settings)),
+            'ctrader_authorized': bool(ctrader.access_token(settings, redis_client)),
         }
 
     @app.post('/accounts', dependencies=[Depends(admin)], status_code=201)
@@ -180,7 +181,7 @@ def create_app(settings=None, factory=None, redis_client=None):
         return {
             'ai': {'provider': 'deepseek', 'configured': deepseek.configured(settings), 'role': 'advisory'},
             'macro': {'provider': 'fred', 'configured': fred.configured(settings), 'prices': False},
-            'market_data': ctrader.status(settings),
+            'market_data': ctrader.status(settings, redis_client),
             'execution_enabled': False,
             'paper_pipeline': ['ctrader', 'strategy', 'risk', 'paper_fill', 'journal'],
         }
@@ -196,7 +197,7 @@ def create_app(settings=None, factory=None, redis_client=None):
     def ai_propose(body:AiProposeRequest):
         quote = None
         try:
-            quote = feed_from_settings(settings).tick(body.symbol).model_dump(mode='json')
+            quote = feed_from_settings(settings, redis_client).tick(body.symbol).model_dump(mode='json')
         except (CTraderAuthRequired, CTraderUnavailable):
             quote = None
         try:
@@ -234,7 +235,7 @@ def create_app(settings=None, factory=None, redis_client=None):
 
     def _feed():
         try:
-            return feed_from_settings(settings)
+            return feed_from_settings(settings, redis_client)
         except CTraderAuthRequired as exc:
             raise HTTPException(401, str(exc)) from None
         except CTraderUnavailable as exc:
@@ -242,7 +243,34 @@ def create_app(settings=None, factory=None, redis_client=None):
 
     @app.get('/market/ctrader/status', dependencies=[Depends(research)])
     def ctrader_status():
-        return ctrader.status(settings)
+        return ctrader.status(settings, redis_client)
+
+    @app.get('/market/ctrader/authorize', dependencies=[Depends(research)])
+    def ctrader_authorize():
+        try:
+            url = ctrader.authorization_url(settings, redis_client)
+        except CTraderAuthRequired as exc:
+            raise HTTPException(401, str(exc)) from None
+        return {'authorization_url': url, 'account_id': settings.ctrader_account_id, 'orders': 'disabled'}
+
+    @app.get('/research/ctrader/callback', response_class=HTMLResponse)
+    def ctrader_callback(code: str = '', state: str = '', error: str = ''):
+        from services.ctrader import tokens as token_store
+        if error:
+            return HTMLResponse(f'<h1>cTrader OAuth error</h1><p>{error}</p>', status_code=400)
+        if not token_store.consume_state(redis_client, state):
+            return HTMLResponse('<h1>Invalid OAuth state</h1><p>Retry /market/ctrader/authorize</p>', status_code=400)
+        try:
+            payload = ctrader.exchange_code(settings, code)
+            if payload.get('errorCode') or payload.get('error'):
+                return HTMLResponse(f'<h1>Token exchange failed</h1><p>{payload.get("description") or payload.get("error")}</p>', status_code=400)
+            token_store.save_tokens(redis_client, payload)
+        except (CTraderAuthRequired, CTraderUnavailable) as exc:
+            return HTMLResponse(f'<h1>cTrader unavailable</h1><p>{exc}</p>', status_code=503)
+        account = settings.ctrader_account_id or 'unknown'
+        return HTMLResponse(
+            f'<h1>cTrader connected</h1><p>Account {account} authorized for market data only. Orders stay disabled.</p>'
+        )
 
     @app.get('/market/ctrader/symbols', dependencies=[Depends(research)])
     def ctrader_symbols():

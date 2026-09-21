@@ -16,6 +16,9 @@ def settings(**kw):
 class Cache:
     def ping(self):return True
     def close(self):pass
+    def get(self, key): return None
+    def setex(self, *args, **kwargs): return True
+    def delete(self, key): return 0
 
 @pytest.fixture
 def client(factory):
@@ -46,6 +49,7 @@ def test_health_and_auth(client):
     assert providers['macro']['provider']=='fred'
     assert providers['macro']['prices'] is False
     assert providers['market_data']['provider']=='ctrader'
+    assert providers['market_data']['account_id'] is None
     assert client.get('/market/ctrader/quote',headers={'x-api-key':RESEARCH},params={'symbol':'EURUSD'}).status_code==401
     assert client.get('/accounts').status_code==401
     assert client.post('/control/resume-paper',headers={'x-api-key':RESEARCH},json={'reason':'bypass'}).status_code==401

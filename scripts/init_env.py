@@ -12,7 +12,7 @@ content=('APP_ENV=development\nTRADING_MODE=paper\nEXECUTION_ENABLED=false\n'
          'REDIS_URL=redis://redis:6379/0\n'
          'DEEPSEEK_API_KEY=\nFRED_API_KEY=\nCTRADER_CLIENT_ID=\nCTRADER_CLIENT_SECRET=\n'
          'CTRADER_REDIRECT_URI=https://trader.acshop.shop/research/ctrader/callback\n'
-         'CTRADER_ACCESS_TOKEN=\nCTRADER_ACCOUNT_ID=\n')
+         'CTRADER_ACCESS_TOKEN=\nCTRADER_ACCOUNT_ID=\n'))
 try:
     fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
 except FileExistsError:

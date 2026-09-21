@@ -14,11 +14,16 @@ def settings(**kw):
     return Settings(_env_file=None,postgres_password='p'*32,admin_api_key=ADMIN,research_api_key=RESEARCH,**kw)
 
 class Cache:
+    def __init__(self):
+        self.store = {}
     def ping(self):return True
     def close(self):pass
-    def get(self, key): return None
-    def setex(self, *args, **kwargs): return True
-    def delete(self, key): return 0
+    def get(self, key): return self.store.get(key)
+    def setex(self, key, ttl, value):
+        self.store[key] = value
+        return True
+    def delete(self, key):
+        return 1 if self.store.pop(key, None) is not None else 0
 
 @pytest.fixture
 def client(factory):
@@ -55,6 +60,33 @@ def test_health_and_auth(client):
     assert client.post('/control/resume-paper',headers={'x-api-key':RESEARCH},json={'reason':'bypass'}).status_code==401
     assert client.post('/accounts',headers={'x-api-key':RESEARCH},json={}).status_code==401
     assert client.post('/orders',json={}).status_code==404
+    auth=client.get('/market/ctrader/authorize',headers={'x-api-key':RESEARCH})
+    assert auth.status_code==401
+    token=client.post('/market/ctrader/token',headers={'x-api-key':RESEARCH},json={'access_token':'x'*20})
+    assert token.status_code==401
+
+
+def test_ctrader_account_info_token_paste(factory):
+    cache=Cache()
+    with TestClient(create_app(settings(ctrader_client_id='40796_id',ctrader_client_secret='secret',
+                                        ctrader_account_id='17204978'),factory,cache)) as client:
+        rh={'x-api-key':RESEARCH};ah={'x-api-key':ADMIN}
+        status=client.get('/market/ctrader/status',headers=rh).json()
+        assert status['scope']=='accounts'
+        assert status['orders']=='disabled'
+        assert 'scope=trading' not in status['authorization_url']
+        auth=client.get('/market/ctrader/authorize',headers=rh).json()
+        assert auth['scope']=='accounts'
+        assert auth['account_id']=='17204978'
+        assert 'scope=trading' not in auth['authorization_url']
+        saved=client.post('/market/ctrader/token',headers=ah,json={'access_token':'sandbox-token-from-get-token'})
+        assert saved.status_code==200
+        assert saved.json()['authorized'] is True
+        assert saved.json()['orders']=='disabled'
+        assert client.get('/status',headers=rh).json()['ctrader_authorized'] is True
+        html=client.get('/research/ctrader/callback',params={'access_token':'another-sandbox-token'})
+        assert html.status_code==200
+        assert b'Orders stay disabled' in html.content
 
 
 def test_workflow(client,factory,account,signal,market):

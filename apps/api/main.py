@@ -51,6 +51,12 @@ class AiProposeRequest(Contract):
     value_per_price_unit: Positive = Field(default='1')
     context: dict = Field(default_factory=dict)
 
+class CtraderTokenBody(Contract):
+    access_token: str = Field(min_length=8, max_length=4096)
+    refresh_token: str | None = None
+    expires_in: int = Field(default=86400, gt=0)
+
+
 class PaperRunRequest(Contract):
     request_key: str = Field(min_length=1, max_length=128)
     symbol: str = Field(min_length=1, max_length=32)
@@ -251,15 +257,31 @@ def create_app(settings=None, factory=None, redis_client=None):
             url = ctrader.authorization_url(settings, redis_client)
         except CTraderAuthRequired as exc:
             raise HTTPException(401, str(exc)) from None
-        return {'authorization_url': url, 'account_id': settings.ctrader_account_id, 'orders': 'disabled'}
+        return {'authorization_url': url, 'account_id': settings.ctrader_account_id, 'orders': 'disabled',
+                'scope': 'accounts', 'note': 'Use Account info until the Spotware app is Active. Trading scope needs KYC.'}
+
+    @app.post('/market/ctrader/token', dependencies=[Depends(admin)])
+    def ctrader_save_token(body: CtraderTokenBody):
+        from services.ctrader import tokens as token_store
+        token_store.save_tokens(redis_client, {
+            'access_token': body.access_token,
+            'refresh_token': body.refresh_token,
+            'expires_in': body.expires_in,
+        })
+        return {'authorized': True, 'account_id': settings.ctrader_account_id, 'orders': 'disabled', 'scope': 'accounts'}
 
     @app.get('/research/ctrader/callback', response_class=HTMLResponse)
-    def ctrader_callback(code: str = '', state: str = '', error: str = ''):
+    def ctrader_callback(code: str = '', state: str = '', error: str = '', access_token: str = ''):
         from services.ctrader import tokens as token_store
         if error:
             return HTMLResponse(f'<h1>cTrader OAuth error</h1><p>{error}</p>', status_code=400)
-        if not token_store.consume_state(redis_client, state):
+        if access_token:
+            token_store.save_tokens(redis_client, {'access_token': access_token, 'expires_in': 86400})
+            return HTMLResponse('<h1>cTrader connected</h1><p>Account info token saved. Orders stay disabled.</p>')
+        if state and not token_store.consume_state(redis_client, state):
             return HTMLResponse('<h1>Invalid OAuth state</h1><p>Retry /market/ctrader/authorize</p>', status_code=400)
+        if not code:
+            return HTMLResponse('<h1>Missing code</h1><p>Click Get token with Account info, then paste the token if shown.</p>', status_code=400)
         try:
             payload = ctrader.exchange_code(settings, code)
             if payload.get('errorCode') or payload.get('error'):
@@ -269,7 +291,7 @@ def create_app(settings=None, factory=None, redis_client=None):
             return HTMLResponse(f'<h1>cTrader unavailable</h1><p>{exc}</p>', status_code=503)
         account = settings.ctrader_account_id or 'unknown'
         return HTMLResponse(
-            f'<h1>cTrader connected</h1><p>Account {account} authorized for market data only. Orders stay disabled.</p>'
+            f'<h1>cTrader connected</h1><p>Account {account} authorized for account/market data only. Orders stay disabled.</p>'
         )
 
     @app.get('/market/ctrader/symbols', dependencies=[Depends(research)])

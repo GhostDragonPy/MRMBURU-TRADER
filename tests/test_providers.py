@@ -27,5 +27,7 @@ def test_providers_report_without_secrets():
     assert status['execution_enabled'] is False
     assert status['orders']=='disabled'
     assert status['market_data']=='principal'
+    assert status['scope']=='accounts'
     assert '40796_id' in status['authorization_url']
+    assert 'scope=trading' not in status['authorization_url']
     assert 'secret' not in str(status)

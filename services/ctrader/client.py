@@ -31,6 +31,7 @@ def status(settings, redis_client=None):
         'configured': ready,
         'authorized': bool(access_token(settings, redis_client)),
         'account_id': settings.ctrader_account_id,
+        'scope': 'accounts',
         'market_data': 'principal',
         'execution_enabled': False,
         'orders': 'disabled',
@@ -40,7 +41,6 @@ def status(settings, redis_client=None):
         query = urlencode({
             'client_id': settings.ctrader_client_id.get_secret_value(),
             'redirect_uri': redirect,
-            'scope': 'trading',
             'product': 'web',
         })
         payload['authorization_url'] = f'{CTRADER_AUTH}?{query}'
@@ -55,7 +55,6 @@ def authorization_url(settings, redis_client):
     query = urlencode({
         'client_id': settings.ctrader_client_id.get_secret_value(),
         'redirect_uri': settings.ctrader_redirect_uri,
-        'scope': 'trading',
         'product': 'web',
         'state': state,
     })

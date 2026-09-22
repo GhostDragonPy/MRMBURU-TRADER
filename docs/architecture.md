@@ -14,8 +14,10 @@ La base también exige `accounts.mode='paper'`. No hay endpoint que cambie esos 
 
 ## Flujo implementado
 
-Señal → snapshot sintético de cuenta → Risk Engine → reglas genéricas de fondeo →
-registro atómico de señal/decisión/auditoría. Finaliza allí: no llega a un broker.
+cTrader market data (bid/ask, OHLC, account) → Strategy Engine → señal →
+Risk Engine (puede rechazar aunque DeepSeek apruebe) → paper fill local →
+Trade Journal. FRED no entra en precios. No hay envío de órdenes al broker.
+`TRADING_MODE=paper`. `executable` permanece false para el broker.
 Los controles se obtienen de la base; el cliente de investigación no decide límites.
 Se bloquea primero la fila del Kill Switch y luego la cuenta al evaluar; la API STOP
 usa la misma fila. La base debe ser PostgreSQL para locks de producción: SQLite solo sirve

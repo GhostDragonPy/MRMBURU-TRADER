@@ -1,0 +1,37 @@
+name: checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: trader_test
+          POSTGRES_USER: test
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: [5432:5432]
+        options: >-
+          --health-cmd "pg_isready -U test -d trader_test"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      TEST_POSTGRES_URL: postgresql+psycopg://test@localhost:5432/trader_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m pytest
+      - run: python scripts/check_secrets.py
+      - run: python scripts/init_env.py
+      - run: docker compose config --quiet
+      - run: docker compose up --build --wait api worker
+      - run: curl --fail http://127.0.0.1:8000/ready
+      - run: curl --fail http://127.0.0.1:8000/
+      - run: curl --fail http://127.0.0.1:8000/health
+      - if: always()
+        run: docker compose down -v

@@ -77,7 +77,7 @@ def exchange_code(settings, code: str):
 
 
 def open_demo(settings, redis_client=None):
-    """Build a read-only demo Open API connection; never a live endpoint."""
+    """Legacy function name: connects to configured read-only source, never submits orders."""
     from services.ctrader.openapi import ReadOnlyOpenApi
 
     token = access_token(settings, redis_client)

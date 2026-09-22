@@ -1,4 +1,4 @@
-"""Synchronous, read-only cTrader demo Open API transport."""
+"""Synchronous read-only cTrader transport; broker order messages are forbidden."""
 from __future__ import annotations
 
 import socket
@@ -8,6 +8,7 @@ from contextlib import AbstractContextManager
 from collections import deque
 from itertools import count
 from uuid import uuid4
+from time import monotonic
 
 from ctrader_open_api.messages.OpenApiCommonMessages_pb2 import ProtoHeartbeatEvent, ProtoMessage
 from ctrader_open_api.messages.OpenApiMessages_pb2 import (
@@ -18,7 +19,8 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import (
 )
 from services.ctrader.types import CTraderAuthRequired, CTraderUnavailable
 
-DEMO_HOST = "demo.ctraderapi.com"
+# Legacy constant name retained; matches the VPS account's read-only Live source.
+DEMO_HOST = "live.ctraderapi.com"
 PROTOBUF_PORT = 5035
 MAX_FRAME = 15_000_000
 READ_ONLY_REQUEST_TYPES = {
@@ -32,7 +34,7 @@ READ_ONLY_REQUEST_TYPES = {
 
 
 class ReadOnlyOpenApi(AbstractContextManager):
-    """Authenticated demo connection limited to explicitly supplied reads."""
+    """Authenticated connection limited to an explicit read-only allowlist."""
 
     def __init__(self, *, client_id: str, client_secret: str, access_token: str,
                  account_id: int, timeout: float = 10):
@@ -44,6 +46,7 @@ class ReadOnlyOpenApi(AbstractContextManager):
         self._socket = None
         self._ids = count(1)
         self._pending = deque()
+        self._deadline = None
 
     def __enter__(self):
         try:
@@ -62,7 +65,7 @@ class ReadOnlyOpenApi(AbstractContextManager):
             raise
         except (OSError, ssl.SSLError, ValueError) as exc:
             self.close()
-            raise CTraderUnavailable(f"cTrader demo connection failed: {exc}") from exc
+            raise CTraderUnavailable(f"cTrader read-only connection failed: {exc}") from exc
 
     def __exit__(self, *_):
         self.close()
@@ -85,6 +88,11 @@ class ReadOnlyOpenApi(AbstractContextManager):
     def _read_exactly(self, size: int) -> bytes:
         chunks = bytearray()
         while len(chunks) < size:
+            if self._deadline is not None:
+                remaining = self._deadline - monotonic()
+                if remaining <= 0:
+                    raise CTraderUnavailable('cTrader operation deadline exceeded')
+                self._socket.settimeout(remaining)
             chunk = self._socket.recv(size - len(chunks))
             if not chunk:
                 raise CTraderUnavailable("cTrader closed the connection")
@@ -117,6 +125,7 @@ class ReadOnlyOpenApi(AbstractContextManager):
     def request(self, payload):
         if payload.payloadType not in READ_ONLY_REQUEST_TYPES:
             raise CTraderUnavailable('Blocked non-read-only cTrader request')
+        self._deadline = monotonic() + self.timeout
         client_msg_id = f"mrmburu-{next(self._ids)}-{uuid4().hex}"
         self._write(payload, client_msg_id)
         while True:
@@ -133,7 +142,10 @@ class ReadOnlyOpenApi(AbstractContextManager):
             return response
 
     def wait_for(self, response_class, predicate=lambda _: True):
+        self._deadline = monotonic() + self.timeout
         while True:
+            if monotonic() >= self._deadline:
+                raise CTraderUnavailable('cTrader event deadline exceeded')
             envelope = self._pending.popleft() if self._pending else self.receive()
             if envelope.payloadType != response_class().payloadType:
                 continue

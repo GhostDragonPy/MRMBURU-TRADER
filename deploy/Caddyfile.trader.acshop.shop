@@ -1,0 +1,16 @@
+# MRMBURU-TRADER — FastAPI paper research en 127.0.0.1:8000
+# Stack: /root/Sistemas/mrmburu-trader (docker compose)
+# DNS: trader.acshop.shop A → 207.244.235.128
+
+trader.acshop.shop {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		X-Frame-Options DENY
+	}
+
+	reverse_proxy 127.0.0.1:8000
+}

@@ -7,6 +7,18 @@ def uid(): return str(uuid4())
 def utcnow(): return datetime.now(timezone.utc)
 class Base(DeclarativeBase): pass
 
+class PaperLedger(Base):
+    __tablename__ = 'paper_ledgers'
+    account_id = Column(ForeignKey('accounts.id'), primary_key=True)
+    state = Column(JSON, nullable=False)
+
+class PaperEvent(Base):
+    __tablename__ = 'paper_events'
+    id = Column(String(36), primary_key=True, default=uid)
+    account_id = Column(ForeignKey('accounts.id'), nullable=False, index=True)
+    payload = Column(JSON, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow, index=True)
+
 class Account(Base):
     __tablename__ = 'accounts'
     id = Column(String(36), primary_key=True, default=uid)

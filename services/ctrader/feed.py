@@ -20,7 +20,7 @@ PRICE_SCALE = Decimal('100000')
 
 
 class LiveCTraderFeed:
-    """Read-only cTrader demo Open API adapter. Never places orders."""
+    """Read-only cTrader Open API adapter. Never places orders."""
 
     def __init__(self, settings, account_id=None, redis_client=None):
         self.settings = settings
@@ -60,6 +60,20 @@ class LiveCTraderFeed:
                       if row.symbolId in details and details[row.symbolId].lotSize else None),
         ) for row in light]
 
+    def instrument(self, symbol: str) -> SymbolInfo:
+        with self._connection() as connection:
+            light = self._find_symbol(connection, symbol)
+            response = connection.request(ProtoOASymbolByIdReq(
+                ctidTraderAccountId=self.account_id, symbolId=[light.symbolId]))
+            row = next((r for r in response.symbol if r.symbolId == light.symbolId), None)
+            if row is None:
+                raise CTraderUnavailable('Missing instrument metadata')
+            return SymbolInfo(name=light.symbolName, digits=row.digits,
+                pip_position=row.pipPosition, lot_size=Decimal(row.lotSize) / 100,
+                min_volume=Decimal(row.minVolume) / 100,
+                max_volume=Decimal(row.maxVolume) / 100,
+                step_volume=Decimal(row.stepVolume) / 100)
+
     def tick(self, symbol: str) -> Tick:
         with self._connection() as connection:
             info = self._find_symbol(connection, symbol)
@@ -73,8 +87,9 @@ class LiveCTraderFeed:
             )
         bid = Decimal(event.bid) / PRICE_SCALE
         ask = Decimal(event.ask) / PRICE_SCALE
-        as_of = (datetime.fromtimestamp(event.timestamp / 1000, tz=timezone.utc)
-                 if event.HasField('timestamp') else datetime.now(timezone.utc))
+        if not event.HasField('timestamp'):
+            raise CTraderUnavailable('Quote has no broker timestamp')
+        as_of = datetime.fromtimestamp(event.timestamp / 1000, tz=timezone.utc)
         return Tick(symbol=info.symbolName, bid=bid, ask=ask,
                     spread_bps=spread_bps(bid, ask), as_of=as_of)
 
@@ -95,15 +110,18 @@ class LiveCTraderFeed:
         bars = []
         for row in response.trendbar[-count:]:
             low = Decimal(row.low) / PRICE_SCALE
+            closed_at = datetime.fromtimestamp(row.utcTimestampInMinutes * 60, tz=timezone.utc) + timedelta(minutes=PERIODS[period_name])
+            if closed_at > now:
+                continue
             bars.append(OhlcBar(
                 symbol=info.symbolName, timeframe=period_name,
                 open=low + Decimal(row.deltaOpen) / PRICE_SCALE,
                 high=low + Decimal(row.deltaHigh) / PRICE_SCALE, low=low,
                 close=low + Decimal(row.deltaClose) / PRICE_SCALE,
                 volume=Decimal(row.volume),
-                closed_at=datetime.fromtimestamp(row.utcTimestampInMinutes * 60, tz=timezone.utc),
+                closed_at=closed_at,
             ))
-        return bars
+        return sorted(bars, key=lambda bar: bar.closed_at)
 
     def _positions(self, connection, names):
         reconcile = connection.request(ProtoOAReconcileReq(ctidTraderAccountId=self.account_id))

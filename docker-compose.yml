@@ -46,6 +46,8 @@ services:
     restart: 'no'
   api:
     <<: *app
+    # edge exposes 127.0.0.1:8000; backend stays internal for postgres/redis.
+    networks: [backend, edge]
     ports: ['127.0.0.1:8000:8000']
     depends_on:
       migrate: {condition: service_completed_successfully}
@@ -58,6 +60,7 @@ services:
     restart: unless-stopped
   worker:
     <<: *app
+    networks: [backend, edge]
     command: [python, -m, apps.worker.main]
     depends_on:
       migrate: {condition: service_completed_successfully}
@@ -71,6 +74,7 @@ services:
 networks:
   backend:
     internal: true
+  edge:
 volumes:
   postgres_data:
   redis_data:

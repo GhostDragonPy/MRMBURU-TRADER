@@ -14,7 +14,7 @@ def migrate(url):
     e=create_engine(url)
     with e.connect() as conn:
         assert conn.scalar(text('SELECT active FROM kill_switch WHERE id=1'))
-        assert len(inspect(conn).get_table_names())==13
+        assert len(inspect(conn).get_table_names())==15
     command.check(c)
     command.downgrade(c,'base')
     command.upgrade(c,'head')

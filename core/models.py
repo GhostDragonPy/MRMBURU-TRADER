@@ -190,6 +190,68 @@ class DemoOwnedPosition(Base):
     signal_id = Column(ForeignKey('demo_order_intents.signal_id'), nullable=False, unique=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
 
+class PropSimControl(Base):
+    __tablename__ = 'prop_sim_control'
+    id = Column(Integer, primary_key=True)
+    rollout = Column(String(16), nullable=False, default='disabled')
+    blocked = Column(Boolean, nullable=False, default=False)
+    protection_failed = Column(Boolean, nullable=False, default=False)
+    canary_day = Column(String(16), nullable=True)
+    canary_consumed = Column(Boolean, nullable=False, default=False)
+    armed_at = Column(DateTime(timezone=True), nullable=True)
+    reason = Column(Text, nullable=False, default='initial')
+    changed_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+    __table_args__ = (
+        CheckConstraint('id = 1', name='prop_sim_control_singleton'),
+        CheckConstraint("rollout IN ('disabled','shadow','canary','enabled')",
+                        name='prop_sim_rollout_states'),
+    )
+
+class PropSimPreflight(Base):
+    __tablename__ = 'prop_sim_preflight'
+    id = Column(Integer, primary_key=True)
+    account_id = Column(String(64), nullable=False)
+    trader_login = Column(String(64), nullable=False)
+    broker = Column(String(32), nullable=False)
+    is_live = Column(Boolean, nullable=False, default=True)
+    host = Column(String(128), nullable=False)
+    symbol = Column(String(16), nullable=False)
+    status = Column(String(16), nullable=False)
+    fingerprint = Column(String(64), nullable=False)
+    checked_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    detail = Column(JSON, nullable=False, default=dict)
+    __table_args__ = (
+        CheckConstraint('id = 1', name='prop_sim_preflight_singleton'),
+        CheckConstraint("status IN ('passed','failed')", name='prop_sim_preflight_status'),
+        CheckConstraint('is_live = true', name='prop_sim_preflight_live_infra'),
+        CheckConstraint("host = 'live.ctraderapi.com'", name='prop_sim_preflight_live_host'),
+        CheckConstraint("broker = 'FTMO'", name='prop_sim_preflight_broker'),
+    )
+
+class PropSimOrderIntent(Base):
+    __tablename__ = 'prop_sim_order_intents'
+    signal_id = Column(String(64), primary_key=True)
+    status = Column(String(16), nullable=False)
+    request = Column(JSON, nullable=False)
+    response = Column(JSON, nullable=False, default=dict)
+    broker_order_id = Column(String(64), nullable=True)
+    position_id = Column(String(64), nullable=True)
+    fill_price = Column(String(32), nullable=True)
+    stop_loss = Column(String(32), nullable=True)
+    take_profit = Column(String(32), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow, index=True)
+    __table_args__ = (
+        CheckConstraint("status IN ('reserved','shadow','sent','filled','uncertain','failed')",
+                        name='prop_sim_intent_status'),
+    )
+
+class PropSimOwnedPosition(Base):
+    __tablename__ = 'prop_sim_owned_positions'
+    position_id = Column(String(64), primary_key=True)
+    signal_id = Column(ForeignKey('prop_sim_order_intents.signal_id'), nullable=False, unique=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+
 class JournalEntry(Base):
     __tablename__ = 'journal_entries'
     id = Column(String(36), primary_key=True, default=uid)

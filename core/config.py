@@ -7,7 +7,7 @@ from sqlalchemy.engine import URL
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file='.env', extra='ignore')
     app_env: str = 'development'
-    trading_mode: Literal['paper', 'demo-orders'] = 'paper'
+    trading_mode: Literal['paper', 'demo-orders', 'prop-sim'] = 'paper'
     execution_enabled: Literal[False] = False
     allow_live_trading: Literal[False] = False
     demo_execution_enabled: bool = False
@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     ctrader_broker_orders: bool = False
     prop_sim_ctrader_account_id: Optional[str] = None
     prop_sim_trader_login: Optional[str] = None
-    prop_sim_execution_enabled: Literal[False] = False
+    prop_sim_execution_enabled: bool = False
     prop_sim_allowed_account_ids: str = '48803059'
     prop_sim_acknowledged_live_environment: bool = False
     ctrader_oauth_state_secret: Optional[SecretStr] = None
@@ -57,12 +57,23 @@ class Settings(BaseSettings):
     discord_api_url: str = 'http://api:8000'
     discord_rate_limit_per_minute: int = Field(default=10, ge=1, le=60)
 
-    @field_validator('execution_enabled', 'allow_live_trading', 'prop_sim_execution_enabled', mode='before')
+    @field_validator('execution_enabled', 'allow_live_trading', mode='before')
     @classmethod
     def coerce_execution_enabled(cls, value):
         # Env vars arrive as strings; Literal[False] rejects "false" without coercion.
         if isinstance(value, str) and value.strip().lower() in {'false', '0', 'no', 'off', ''}:
             return False
+        return value
+
+    @field_validator('prop_sim_execution_enabled', mode='before')
+    @classmethod
+    def coerce_prop_sim_execution_enabled(cls, value):
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {'false', '0', 'no', 'off', ''}:
+                return False
+            if lowered in {'true', '1', 'yes', 'on'}:
+                return True
         return value
 
     @field_validator('deepseek_api_key', 'fred_api_key', 'ctrader_client_id', 'ctrader_client_secret', 'ctrader_access_token', 'ctrader_oauth_state_secret', 'discord_bot_token', 'discord_api_key', mode='before')
@@ -95,6 +106,15 @@ class Settings(BaseSettings):
                 return None
         from services.ctrader.prop_sim import PROP_SIM_CTID, PROP_SIM_TRADER_LOGIN
         validate_settings(self)
+        if self.trading_mode == 'prop-sim':
+            if not self.esses_broker_execution:
+                raise ValueError('prop-sim requires ESSES_BROKER_EXECUTION=true')
+            if not self.prop_sim_acknowledged_live_environment:
+                raise ValueError('prop-sim requires PROP_SIM_ACKNOWLEDGED_LIVE_ENVIRONMENT=true')
+            if self.ctrader_environment != 'live':
+                raise ValueError('prop-sim requires CTRADER_ENVIRONMENT=live')
+            if not (self.prop_sim_ctrader_account_id or '').strip():
+                raise ValueError('prop-sim requires PROP_SIM_CTRADER_ACCOUNT_ID')
         prop_id = (self.prop_sim_ctrader_account_id or '').strip()
         login = (self.prop_sim_trader_login or '').strip()
         if prop_id and prop_id != PROP_SIM_CTID:

@@ -82,18 +82,25 @@ def _owned_label(label):
 class TlsProtobufDriver:
     """Length-prefixed protobuf over TLS. Host locked to the DEMO endpoint."""
 
-    def __init__(self, *, timeout=10, connect_fn=socket.create_connection):
-        self.host = DEMO_HOST
+    def __init__(self, *, timeout=10, connect_fn=socket.create_connection, host=DEMO_HOST,
+                 allow_live=False):
+        self.host = host
         self.port = PROTOBUF_PORT
         self.timeout = timeout
         self._connect_fn = connect_fn
+        self.allow_live = bool(allow_live)
         self._socket = None
         self._pending = deque()
         self._deadline = None
         self.writes = []
 
     def connect(self):
-        if self.host != DEMO_HOST or self.port != PROTOBUF_PORT or self.host == LIVE_HOST:
+        if self.port != PROTOBUF_PORT:
+            raise DemoGuardError('LIVE endpoint rejected')
+        if self.host == LIVE_HOST:
+            if not self.allow_live:
+                raise DemoGuardError('LIVE endpoint rejected')
+        elif self.host != DEMO_HOST:
             raise DemoGuardError('LIVE endpoint rejected')
         raw = self._connect_fn((self.host, self.port), self.timeout)
         raw.settimeout(self.timeout)
@@ -217,20 +224,33 @@ class SdkDemoSession:
     """Authenticated DEMO session with heartbeat and a trading-message barrier."""
 
     def __init__(self, *, account_id, client_id, client_secret, access_token, barrier,
-                 budget=None, driver=None, timeout=10):
-        if str(account_id) in LIVE_ACCOUNT_IDS:
-            raise DemoGuardError('LIVE account rejected')
+                 budget=None, driver=None, timeout=10, identity='demo'):
+        self.identity = identity
+        if identity == 'demo':
+            if str(account_id) in LIVE_ACCOUNT_IDS:
+                raise DemoGuardError('LIVE account rejected')
+            self.host = DEMO_HOST
+            self.environment = 'demo'
+            allow_live = False
+        elif identity == 'prop-sim':
+            from services.ctrader.prop_sim import PROP_SIM_CTID
+            if str(account_id) != PROP_SIM_CTID:
+                raise DemoGuardError('PROP_SIM_TUPLE_MISMATCH')
+            self.host = LIVE_HOST
+            self.environment = 'live'
+            allow_live = True
+        else:
+            raise DemoGuardError('Invalid session identity')
         self.account_id = int(account_id)
         self.client_id = client_id
         self.client_secret = client_secret
         self.access_token = access_token
         self.barrier = barrier
         self.budget = budget
-        self.driver = driver or TlsProtobufDriver(timeout=timeout)
+        self.driver = driver or TlsProtobufDriver(
+            timeout=timeout, host=self.host, allow_live=allow_live)
         self.timeout = timeout
-        self.host = DEMO_HOST
         self.port = PROTOBUF_PORT
-        self.environment = 'demo'
         self.transport = 'sdk-tls'
         self.persistent = True
         self.healthy = False
@@ -271,8 +291,12 @@ class SdkDemoSession:
             return self.driver.await_execution(payload, self._client_msg_id(), self.timeout)
 
     def connect(self):
-        if getattr(self.driver, 'host', DEMO_HOST) != DEMO_HOST:
-            raise DemoGuardError('LIVE endpoint rejected')
+        driver_host = getattr(self.driver, 'host', self.host)
+        if self.identity == 'demo':
+            if driver_host != DEMO_HOST:
+                raise DemoGuardError('LIVE endpoint rejected')
+        elif driver_host != LIVE_HOST:
+            raise DemoGuardError('LIVE host required for prop-sim')
         self.driver.connect()
         self.healthy = True
 
@@ -285,19 +309,42 @@ class SdkDemoSession:
         listed = self._request(ProtoOAGetAccountListByAccessTokenReq(accessToken=self.access_token))
         self.permission_scope = getattr(listed, 'permissionScope', None)
         self.trading_permission = permission_label(self.permission_scope)
-        self.accounts = [
-            {'ctidTraderAccountId': int(row.ctidTraderAccountId), 'isLive': bool(row.isLive)}
-            for row in listed.ctidTraderAccount
-        ]
+        self.accounts = []
+        for row in listed.ctidTraderAccount:
+            login = int(row.traderLogin) if row.HasField('traderLogin') else None
+            self.accounts.append({
+                'ctidTraderAccountId': int(row.ctidTraderAccountId),
+                'isLive': bool(row.isLive),
+                'traderLogin': login,
+            })
         match = next((row for row in self.accounts if row['ctidTraderAccountId'] == self.account_id), None)
         if match is None:
             raise DemoGuardError('DEMO account is not authorized for this token')
-        if match['isLive'] is True:
-            raise DemoGuardError('LIVE account rejected')
+        if self.identity == 'demo':
+            if match['isLive'] is True:
+                raise DemoGuardError('LIVE account rejected')
+        else:
+            from services.ctrader.prop_sim import PROP_SIM_BROKER, PROP_SIM_CTID, PROP_SIM_TRADER_LOGIN
+            other_live = [row for row in self.accounts
+                          if row['isLive'] is True and str(row['ctidTraderAccountId']) != PROP_SIM_CTID]
+            if other_live:
+                raise DemoGuardError('OTHER_LIVE_ACCOUNT_BLOCKED')
+            if match['isLive'] is not True:
+                raise DemoGuardError('PROP_SIM_TUPLE_MISMATCH')
         self._request(ProtoOAAccountAuthReq(
             ctidTraderAccountId=self.account_id, accessToken=self.access_token,
         ))
         self.account_auth = True
+        if self.identity == 'prop-sim':
+            from services.ctrader.prop_sim import PROP_SIM_BROKER, PROP_SIM_TRADER_LOGIN
+            trader_res = self._request(ProtoOATraderReq(ctidTraderAccountId=self.account_id))
+            trader = trader_res.trader
+            login = str(int(trader.traderLogin) if trader.HasField('traderLogin') else '')
+            broker = str(trader.brokerName or '').strip().upper()
+            if login != PROP_SIM_TRADER_LOGIN or broker != PROP_SIM_BROKER:
+                raise DemoGuardError('PROP_SIM_TUPLE_MISMATCH')
+            match['traderLogin'] = int(login)
+            match['broker'] = broker
         self._start_heartbeat()
         return self._auth_payload()
 

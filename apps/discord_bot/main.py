@@ -19,6 +19,8 @@ INTERNAL_PATHS = frozenset({
     '/internal/discord/broker-order',
     '/internal/discord/demo-status', '/internal/discord/demo-emergency-stop',
     '/internal/discord/demo-rollout', '/internal/discord/demo-preflight',
+    '/internal/discord/prop-sim-status', '/internal/discord/prop-sim-emergency-stop',
+    '/internal/discord/prop-sim-preflight', '/internal/discord/prop-sim-rollout',
     '/internal/discord/pause', '/internal/discord/resume',
 })
 

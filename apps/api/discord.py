@@ -92,10 +92,29 @@ def mount(app, *, settings, factory, redis_client, db):
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
 
+    IDENTITY_KEYS = (
+        'demo_ctrader_account_id', 'prop_sim_ctrader_account_id', 'prop_sim_trader_login',
+        'trader_login', 'account_id', 'ctrader_account_id', 'host', 'broker',
+        'ctrader_environment', 'ctrader_host',
+    )
+
+    def reject_identity_mutation(body):
+        if any(body.get(key) for key in IDENTITY_KEYS):
+            raise HTTPException(403, 'Discord cannot select accounts or hosts')
+        if body.get('ctrader_environment') == 'live':
+            raise HTTPException(403, 'Discord cannot select accounts or hosts')
+
     @app.post('/internal/discord/broker-order')
     def broker_order(body:DiscordBrokerOrder, user=Depends(authorized), session=Depends(db)):
+        from services.ctrader.guards_accounts import FORBIDDEN_EXECUTION_ACCOUNTS
         from services.ctrader.orders import place_min_market
         from services.ctrader.types import CTraderAuthRequired, CTraderUnavailable
+        if settings.trading_mode == 'prop-sim':
+            raise HTTPException(403, 'Discord cannot change prop-sim execution')
+        if str(settings.ctrader_account_id or '') in FORBIDDEN_EXECUTION_ACCOUNTS:
+            raise HTTPException(403, 'Discord cannot select accounts or hosts')
+        if str(settings.prop_sim_ctrader_account_id or '') and settings.trading_mode == 'prop-sim':
+            raise HTTPException(403, 'Discord cannot select accounts or hosts')
         def execute():
             result = place_min_market(settings, redis_client, side=body.side)
             result['reason'] = body.reason
@@ -182,6 +201,7 @@ def mount(app, *, settings, factory, redis_client, db):
             raise HTTPException(403, 'Discord cannot enable execution')
         if target == 'live' or body.get('allow_live_trading'):
             raise HTTPException(403, 'LIVE trading cannot be enabled')
+        reject_identity_mutation(body)
         if body.get('demo_ctrader_account_id') or body.get('host') or body.get('ctrader_environment') == 'live':
             raise HTTPException(403, 'Discord cannot select accounts or hosts')
         def execute():
@@ -192,6 +212,55 @@ def mount(app, *, settings, factory, redis_client, db):
         return discord_sandbox.idempotent(session, interaction_id=interaction_id,
             user_id=user, action='demo-rollout',
             payload={'target':target,'reason':reason}, operation=execute)
+
+    @app.get('/internal/discord/prop-sim-status')
+    def prop_sim_status(user=Depends(authorized), session=Depends(db)):
+        from services.ctrader import tokens as token_store
+        from services.prop_sim_orders.service import status_payload
+        audit_read(session, user, 'prop_sim_status')
+        record = token_store.load_token_record(redis_client, profile='prop-sim') if redis_client else None
+        payload = status_payload(session, settings, (record or {}).get('scope'),
+                                 redis_client=redis_client)
+        payload['allow_live_trading'] = False
+        payload['execution_enabled'] = False
+        return payload
+
+    @app.get('/internal/discord/prop-sim-preflight')
+    def prop_sim_preflight_status(user=Depends(authorized), session=Depends(db)):
+        from services.prop_sim_orders.preflight import public_preflight
+        audit_read(session, user, 'prop_sim_preflight')
+        return public_preflight(session, settings)
+
+    @app.post('/internal/discord/prop-sim-emergency-stop')
+    def prop_sim_emergency_stop(body:DiscordControl, user=Depends(authorized), session=Depends(db)):
+        from services.prop_sim_orders.service import emergency_stop
+        def execute():
+            return emergency_stop(session, body.reason)
+        return discord_sandbox.idempotent(session, interaction_id=body.interaction_id,
+            user_id=user, action='prop-sim-emergency-stop',
+            payload={'reason':body.reason}, operation=execute)
+
+    @app.post('/internal/discord/prop-sim-rollout')
+    def prop_sim_rollout(body:dict, user=Depends(authorized), session=Depends(db)):
+        from services.demo_orders.guards import DemoGuardError
+        from services.prop_sim_orders.service import advance_rollout
+        target = body.get('target')
+        confirmed = body.get('confirmed') is True
+        interaction_id = body.get('interaction_id', '')
+        reason = body.get('reason', 'rollout')
+        if body.get('execution_enabled') or body.get('prop_sim_execution_enabled') is True:
+            raise HTTPException(403, 'Discord cannot enable execution')
+        if target == 'live' or body.get('allow_live_trading'):
+            raise HTTPException(403, 'LIVE trading cannot be enabled')
+        reject_identity_mutation(body)
+        def execute():
+            try:
+                return advance_rollout(session, target, confirmed=confirmed)
+            except DemoGuardError as exc:
+                raise HTTPException(409, str(exc)) from None
+        return discord_sandbox.idempotent(session, interaction_id=interaction_id,
+            user_id=user, action='prop-sim-rollout',
+            payload={'target': target, 'reason': reason}, operation=execute)
 
     @app.post('/internal/discord/resume')
     def resume(body:DiscordControl, user=Depends(authorized), session=Depends(db)):

@@ -12,6 +12,9 @@ def main():
         demo_on = (os.environ.get('DEMO_EXECUTION_ENABLED') or 'false').strip().lower() == 'true'
         if mode == 'demo-orders' and demo_on and not cache.exists('demo:preflight:ok'):
             raise SystemExit(1)
+        prop_on = (os.environ.get('PROP_SIM_EXECUTION_ENABLED') or 'false').strip().lower() == 'true'
+        if mode == 'prop-sim' and prop_on and not cache.exists('prop-sim:preflight:ok'):
+            raise SystemExit(1)
     finally:
         cache.close()
 

@@ -17,6 +17,8 @@ def validate_settings(settings):
     mode = getattr(settings, 'trading_mode', 'paper')
     if mode == 'paper':
         return
+    if mode == 'prop-sim':
+        return
     if mode != 'demo-orders':
         raise ValueError('Unsupported trading mode')
     if not settings.esses_broker_execution:

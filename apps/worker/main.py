@@ -39,6 +39,7 @@ def paper_loop(settings, factory, cache, stop, demo_sdk=None):
                         import json as json_lib
                         scope = token_store.effective_scope(cache) or 'accounts'
                         demo = control(session)
+                        sess = demo_sdk.get('session')
                         if demo.rollout in ('shadow', 'canary', 'enabled'):
                             sess = demo_sdk.get('session')
                             if sess is None or not getattr(sess, 'healthy', False):
@@ -52,6 +53,32 @@ def paper_loop(settings, factory, cache, stop, demo_sdk=None):
                                 cache.set('demo:socket', json_lib.dumps(sess.snapshot_status()))
                                 if sess.trading_permission == 'VERIFIED':
                                     cache.set('demo:preflight:ok', '1', ex=3600)
+                        gw = build_gateway(settings, cache, db_session=session, token_scope=scope,
+                            protobuf_session=sess, rollout=demo.rollout)
+                        on_paper_cycle(session, settings, result, now=datetime.now(timezone.utc),
+                            gateway=gw, token_scope=scope, redis_client=cache)
+                    elif getattr(settings, 'trading_mode', 'paper') == 'prop-sim':
+                        from services.ctrader import tokens as token_store
+                        from services.prop_sim_orders.factory import build_gateway, open_shadow_session
+                        from services.prop_sim_orders.service import control, on_paper_cycle
+                        import json as json_lib
+                        record = token_store.load_token_record(cache, profile='prop-sim') if cache else None
+                        scope = (record or {}).get('scope') or 'accounts'
+                        demo = control(session)
+                        sess = demo_sdk.get('session')
+                        if demo.rollout in ('shadow', 'canary', 'enabled'):
+                            sess = demo_sdk.get('session')
+                            if sess is None or not getattr(sess, 'healthy', False):
+                                try:
+                                    sess = open_shadow_session(settings, cache, demo=demo)
+                                    demo_sdk['session'] = sess
+                                except Exception as exc:
+                                    logging.error('PROP SIM socket unavailable: %s', type(exc).__name__)
+                                    sess = None
+                            if sess is not None:
+                                cache.set('prop-sim:socket', json_lib.dumps(sess.snapshot_status()))
+                                if sess.trading_permission == 'VERIFIED':
+                                    cache.set('prop-sim:preflight:ok', '1', ex=3600)
                         gw = build_gateway(settings, cache, db_session=session, token_scope=scope,
                             protobuf_session=sess, rollout=demo.rollout)
                         on_paper_cycle(session, settings, result, now=datetime.now(timezone.utc),

@@ -31,9 +31,10 @@ def help_text():
         f'{banner()}\n\n'
         f'**Comandos personales:** {personal}\n'
         f'**Comandos administrativos paper:** {admin}\n\n'
+        'Visible y ejecutable solo en #tradehouse por acfz. '
         'Pausa/reanudación solo afecta entradas automáticas paper. '
-        '`/paper_order` y `/paper_close` usan la cuenta aislada `discord-sandbox`.\n'
-        'No uses el mismo `DISCORD_BOT_TOKEN` en nanobot u otro proceso a la vez.'
+        '`/paper_order` y `/paper_close` usan la cuenta aislada `discord-sandbox`. '
+        'Ningún comando envía órdenes reales ni muestra secretos.'
     )
 
 
@@ -47,4 +48,6 @@ def identity_payload():
         'admin_commands': list(ADMIN_COMMANDS),
         'personal_commands': list(PERSONAL_COMMANDS),
         'orders': 'disabled',
+        'channel': 'tradehouse',
+        'operator': 'acfz',
     }

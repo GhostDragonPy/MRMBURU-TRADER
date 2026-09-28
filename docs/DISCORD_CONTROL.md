@@ -12,10 +12,18 @@ The container receives only its Discord token, an internal API key, IDs used for
 authorization, and Redis/API addresses. It does not receive the cTrader
 environment variables.
 
+Commands are accepted only in `#tradehouse` and only from Discord username
+`acfz` (plus the configured guild, role, and user-id allowlist). Replies stay
+ephemeral. `/tokens` reports command-usage counts only; it never prints secrets,
+API keys, or `.env` values. `/buscar` rejects URLs and does not run a shell.
+`/clima` queries `https://wttr.in` with a timeout and a response-size cap.
+Reminders use `America/Asuncion`.
+
 Never run two gateways with the same `DISCORD_BOT_TOKEN`. Stop nanobot (or any
 other Discord client using that token) before enabling this service. Startup
-takes a Redis lock (`discord:gateway:lock`) and exits if another process already
-holds the same token.
+takes a Redis lock (`discord:gateway:lock`) with TTL, owner token, periodic
+renewal, and compare-and-delete release. A Redis failure refuses to start. A
+crash does not lock the token forever because the lock expires.
 
 ## Discord application setup
 

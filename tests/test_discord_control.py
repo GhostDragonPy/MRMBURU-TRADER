@@ -1,4 +1,6 @@
 from decimal import Decimal
+from datetime import datetime
+import json
 from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
@@ -33,13 +35,21 @@ def discord_client(factory, monkeypatch):
     configured=settings(discord_api_key=API_KEY)
     with TestClient(create_app(configured,factory,Cache())) as client: yield client
 
+SCOPE=dict(expected_guild_id=1,admin_role_id=20,allowed_user_ids='10',
+           channel_name='tradehouse',operator_name='acfz')
+
 @pytest.mark.parametrize('values',[
-    dict(guild_id=2,user_id=10,role_ids=[20]),
-    dict(guild_id=1,user_id=11,role_ids=[20]),
-    dict(guild_id=1,user_id=10,role_ids=[21])])
-def test_unauthorized_guild_user_and_role_are_rejected(values):
+    dict(guild_id=2,user_id=10,role_ids=[20],channel_name='tradehouse',operator_name='acfz'),
+    dict(guild_id=1,user_id=11,role_ids=[20],channel_name='tradehouse',operator_name='acfz'),
+    dict(guild_id=1,user_id=10,role_ids=[21],channel_name='tradehouse',operator_name='acfz'),
+    dict(guild_id=1,user_id=10,role_ids=[20],channel_name='general',operator_name='acfz'),
+    dict(guild_id=1,user_id=10,role_ids=[20],channel_name='tradehouse',operator_name='other')])
+def test_unauthorized_guild_user_role_channel_and_operator_are_rejected(values):
     with pytest.raises(AuthorizationError):
         allowed(**values,expected_guild_id=1,admin_role_id=20,allowed_user_ids='10')
+
+def test_only_acfz_in_tradehouse_is_allowed():
+    assert allowed(guild_id=1,user_id=10,role_ids=[20],**SCOPE) is True
 
 def test_api_service_authentication_required(discord_client):
     assert discord_client.get('/internal/discord/status').status_code == 401
@@ -175,65 +185,123 @@ class Memory:
     def incr(self, key):
         self.kv[key] = int(self.kv.get(key) or 0) + 1
         return self.kv[key]
+    def expire(self, key, ttl):
+        assert ttl == 60
     def zadd(self, key, mapping):
         self.z.setdefault(key, {}).update(mapping)
     def zrangebyscore(self, key, minimum, maximum):
         return [member for member, score in self.z.get(key, {}).items() if minimum <= score <= maximum]
     def zrem(self, key, member):
         self.z.get(key, {}).pop(member, None)
+    def eval(self, script, numkeys, *args):
+        key, payload = args[0], args[1]
+        if self.kv.get(key) != payload:
+            return 0
+        if 'DEL' in script:
+            self.kv.pop(key, None)
+            return 1
+        return 1
 
 
 def test_identity_keeps_paper_and_existing_admin_commands():
     payload = identity.identity_payload()
     assert payload['name'] == 'GhostDragon'
     assert payload['execution_enabled'] is False
-    assert payload['mode'] == 'paper'
+    assert payload['channel'] == 'tradehouse'
+    assert payload['operator'] == 'acfz'
     text = identity.help_text()
     for name in identity.ADMIN_COMMANDS + identity.PERSONAL_COMMANDS:
         assert '/'+name in text
-    assert 'discord-sandbox' in text
-    assert 'cTrader' in text
+    assert 'tradehouse' in text and 'acfz' in text
 
 
-def test_gateway_lock_rejects_a_second_process_with_the_same_token(monkeypatch):
+def test_gateway_lock_ttl_owner_and_atomic_release():
     cache = Memory()
-    monkeypatch.setattr(gateway_lock.os, 'getpid', lambda: 11)
-    assert gateway_lock.acquire(cache, 'shared-token') is True
-    monkeypatch.setattr(gateway_lock.os, 'getpid', lambda: 12)
-    with pytest.raises(RuntimeError, match='Another process'):
-        gateway_lock.acquire(cache, 'shared-token')
+    first = gateway_lock.GatewayLock('shared-token', ttl=90)
+    assert first.acquire(cache) is True
+    second = gateway_lock.GatewayLock('shared-token', ttl=90)
+    with pytest.raises(gateway_lock.GatewayLockError, match='Another process'):
+        second.acquire(cache)
+    assert first.refresh(cache) is True
+    assert second.release(cache) is True
+    assert cache.get(gateway_lock.LOCK_KEY) == first.payload
+    assert first.release(cache) is True
+    assert cache.get(gateway_lock.LOCK_KEY) is None
 
 
-def test_personal_reminders_and_usage_stay_local():
+def test_gateway_lock_fails_closed_when_redis_is_down():
+    class Broken:
+        def set(self, *args, **kwargs):
+            raise ConnectionError('redis down')
+    lock = gateway_lock.GatewayLock('token')
+    with pytest.raises(gateway_lock.GatewayLockError, match='Redis unavailable'):
+        lock.acquire(Broken())
+
+
+def test_usage_report_never_includes_secrets():
     cache = Memory()
-    saved = personal.schedule_reminder(cache, user_id=42, channel_id=99, minutes=1, text='revisar paper')
-    assert saved['paper_only'] is True
+    cache.kv['DISCORD_BOT_TOKEN'] = 'secret-value'
     personal.record_usage(cache, 42, 'ayuda')
     personal.record_usage(cache, 42, 'tokens')
     report = personal.usage_report(cache, 42)
-    assert report['command_count'] == 2
+    blob = json.dumps(report)
+    assert report['usage_count'] == 2
+    assert 'command_count' not in report
+    assert 'secret-value' not in blob
+    assert 'DISCORD' not in blob
+    assert '.env' not in blob
+    lowered = blob.lower()
+    assert 'secret-value' not in blob
+    assert 'token' not in lowered
+    assert 'password' not in lowered
+    assert 'credential' not in lowered
+    assert '.env' not in lowered
     assert report['execution_enabled'] is False
-    from datetime import datetime, timezone, timedelta
-    due = personal.due_reminders(cache, now=datetime.now(timezone.utc)+timedelta(minutes=2))
+    assert report['by_command']['usage'] == 1
+
+
+def test_personal_reminders_use_asuncion_and_length_limits():
+    cache = Memory()
+    saved = personal.schedule_reminder(cache, user_id=42, channel_id=99, minutes=1, text='revisar paper')
+    assert saved['timezone'] == 'America/Asuncion'
+    assert saved['paper_only'] is True
+    assert 'America/Asuncion' in saved['due'] or saved['due'].endswith('-03:00') or saved['due'].endswith('-04:00')
+    from datetime import timedelta
+    due = personal.due_reminders(cache, now=datetime.now(personal.ZONE)+timedelta(minutes=2))
     assert due[0]['text'] == 'revisar paper'
-    assert personal.due_reminders(cache) == []
+    with pytest.raises(ValueError):
+        personal.schedule_reminder(Memory(), user_id=1, channel_id=1, minutes=0, text='x')
+    with pytest.raises(ValueError):
+        personal.schedule_reminder(Memory(), user_id=1, channel_id=1, minutes=1, text='no')
 
 
-def test_weather_and_search_use_public_lookups(monkeypatch):
-    class Response:
-        def __init__(self, body): self.body = body.encode()
-        def read(self): return self.body
-        def __enter__(self): return self
-        def __exit__(self, *args): return False
-    def fake_open(request, timeout=8):
-        url = request.get_full_url() if hasattr(request, 'get_full_url') else str(request)
-        if 'wttr.in' in url:
-            return Response('Asuncion: ⛅ +24°C')
-        return Response('{"Heading":"EURUSD","AbstractText":"Par de divisas.","RelatedTopics":[]}')
-    monkeypatch.setattr(personal, 'urlopen', fake_open)
+def test_weather_and_search_reject_urls_and_use_allowlisted_https(monkeypatch):
+    calls = []
+    def fake_get(host, path, timeout=8, max_bytes=256):
+        calls.append((host, path, timeout, max_bytes))
+        assert host in {'wttr.in', 'api.duckduckgo.com'}
+        assert path.startswith('/')
+        if host == 'wttr.in':
+            assert timeout == 8 and max_bytes == 256
+            return b'Asuncion: 24C'
+        return b'{"Heading":"EURUSD","AbstractText":"Par de divisas.","RelatedTopics":[]}'
+    monkeypatch.setattr(personal, 'https_get', fake_get)
     assert 'Asuncion' in personal.weather('Asuncion')
     assert 'Par de divisas' in personal.search('EURUSD')
     with pytest.raises(ValueError):
-        personal.weather(' ')
+        personal.weather('https://evil.test/x')
     with pytest.raises(ValueError):
-        personal.schedule_reminder(Memory(), user_id=1, channel_id=1, minutes=0, text='x')
+        personal.weather('../etc/passwd')
+    with pytest.raises(ValueError):
+        personal.search('http://127.0.0.1/')
+    with pytest.raises(ValueError):
+        personal.search('file:///etc/passwd')
+    assert all(host in {'wttr.in', 'api.duckduckgo.com'} for host, *_ in calls)
+
+
+def test_lookups_reject_unknown_hosts():
+    from apps.discord_bot import lookups
+    with pytest.raises(RuntimeError, match='Host not allowed'):
+        lookups.https_get('example.com', '/')
+    with pytest.raises(RuntimeError, match='Path not allowed'):
+        lookups.https_get('wttr.in', 'http://evil.test')

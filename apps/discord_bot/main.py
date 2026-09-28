@@ -7,9 +7,18 @@ import discord
 from discord import app_commands
 from redis import Redis
 from apps.discord_bot import gateway_lock, identity, personal
-from apps.discord_bot.security import AuthorizationError, allowed, rate_limit
+from apps.discord_bot.security import (
+    AuthorizationError, MAX_POSITION_ID, MAX_REASON, allowed, bounded, rate_limit,
+)
 
 logging.basicConfig(level=logging.INFO)
+INTERNAL_PATHS = frozenset({
+    '/internal/discord/status', '/internal/discord/positions',
+    '/internal/discord/history', '/internal/discord/daily-report',
+    '/internal/discord/paper-order', '/internal/discord/paper-close',
+    '/internal/discord/pause', '/internal/discord/resume',
+})
+
 @dataclass(frozen=True)
 class BotSettings:
     enabled: bool
@@ -32,8 +41,11 @@ def load_settings():
 
 settings = load_settings()
 cache = Redis.from_url(settings.redis_url, socket_connect_timeout=3, socket_timeout=3)
+lock = None
 
 def api(path, user_id, method='GET', payload=None):
+    if path not in INTERNAL_PATHS:
+        raise RuntimeError('Internal path not allowed')
     data = json.dumps(payload).encode() if payload is not None else None
     request = Request(settings.api_url.rstrip('/')+path, data=data, method=method,
         headers={'content-type':'application/json',
@@ -45,14 +57,18 @@ def api(path, user_id, method='GET', payload=None):
         raise RuntimeError(f'Internal API rejected request ({exc.code})') from None
 
 async def call(path, interaction, method='GET', payload=None):
-    rate_limit(cache, user_id=interaction.user.id, limit=settings.rate_limit)
     return await asyncio.to_thread(api, path, interaction.user.id, method, payload)
 
 def authorize(interaction):
     roles = [role.id for role in getattr(interaction.user, 'roles', ())]
-    return allowed(guild_id=interaction.guild_id, user_id=interaction.user.id, role_ids=roles,
+    channel = getattr(interaction, 'channel', None)
+    return allowed(
+        guild_id=interaction.guild_id, user_id=interaction.user.id, role_ids=roles,
         expected_guild_id=settings.guild_id, admin_role_id=settings.admin_role_id,
-        allowed_user_ids=settings.allowed_user_ids)
+        allowed_user_ids=settings.allowed_user_ids,
+        channel_name=getattr(channel, 'name', '') or '',
+        operator_name=getattr(interaction.user, 'name', '') or '',
+    )
 
 class Confirm(discord.ui.View):
     def __init__(self, owner_id, action):
@@ -61,6 +77,7 @@ class Confirm(discord.ui.View):
     async def confirm(self, interaction, button):
         if interaction.user.id != self.owner_id:
             await interaction.response.send_message('Confirmación no autorizada.', ephemeral=True); return
+        if not await guard(interaction): return
         for item in self.children: item.disabled=True
         await interaction.response.defer(ephemeral=True)
         try: result=await self.action(interaction)
@@ -88,9 +105,12 @@ class Client(discord.Client):
 
     async def health_loop(self):
         while not self.is_closed():
-            if self.is_ready():
-                await asyncio.to_thread(cache.setex, 'discord:bot:healthy', 45, '1')
-                await asyncio.to_thread(gateway_lock.refresh, cache, settings.token)
+            if self.is_ready() and lock is not None:
+                try:
+                    await asyncio.to_thread(cache.setex, 'discord:bot:healthy', 45, '1')
+                    await asyncio.to_thread(lock.refresh, cache)
+                except Exception:
+                    await self.close(); return
                 await self.flush_reminders()
             await asyncio.sleep(15)
 
@@ -98,20 +118,24 @@ class Client(discord.Client):
         due = await asyncio.to_thread(personal.due_reminders, cache)
         for item in due:
             channel = self.get_channel(int(item['channel_id']))
-            if channel is None:
+            if channel is None or getattr(channel, 'name', '').casefold() != 'tradehouse':
                 continue
             mention = f"<@{item['user_id']}>"
             await channel.send(f"{identity.CAT} Recordatorio {mention}: {item['text']}")
 
     async def close(self):
-        await asyncio.to_thread(gateway_lock.release, cache, settings.token)
+        if lock is not None:
+            await asyncio.to_thread(lock.release, cache)
         await super().close()
 
 client=Client()
 
 async def guard(interaction):
-    try: authorize(interaction); return True
-    except AuthorizationError as exc:
+    try:
+        authorize(interaction)
+        rate_limit(cache, user_id=interaction.user.id, limit=settings.rate_limit)
+        return True
+    except (AuthorizationError, RuntimeError, ValueError) as exc:
         if interaction.response.is_done(): await interaction.followup.send(str(exc),ephemeral=True)
         else: await interaction.response.send_message(str(exc),ephemeral=True)
         return False
@@ -130,7 +154,7 @@ async def identidad(interaction):
     personal.record_usage(cache, interaction.user.id, 'identidad')
     await interaction.response.send_message(render(identity.identity_payload()), ephemeral=True)
 
-@client.tree.command(name='clima',description='Consulta el clima (wttr.in, sin API key)')
+@client.tree.command(name='clima',description='Consulta el clima (HTTPS wttr.in)')
 async def clima(interaction, ciudad:str):
     if not await guard(interaction): return
     await interaction.response.defer(ephemeral=True)
@@ -141,13 +165,14 @@ async def clima(interaction, ciudad:str):
     personal.record_usage(cache, interaction.user.id, 'clima')
     await interaction.followup.send(text, ephemeral=True)
 
-@client.tree.command(name='tokens',description='Contador local de comandos personales')
+@client.tree.command(name='tokens',description='Estadísticas de uso de comandos, sin secretos')
 async def tokens(interaction):
     if not await guard(interaction): return
     personal.record_usage(cache, interaction.user.id, 'tokens')
-    await interaction.response.send_message(render(personal.usage_report(cache, interaction.user.id)), ephemeral=True)
+    report = personal.usage_report(cache, interaction.user.id)
+    await interaction.response.send_message(render(report), ephemeral=True)
 
-@client.tree.command(name='recordatorio',description='Aviso paper en este canal (1–1440 minutos)')
+@client.tree.command(name='recordatorio',description='Aviso paper en #tradehouse (America/Asuncion)')
 async def recordatorio(interaction, minutos:int, texto:str):
     if not await guard(interaction): return
     try:
@@ -158,9 +183,9 @@ async def recordatorio(interaction, minutos:int, texto:str):
         await interaction.response.send_message(str(exc), ephemeral=True); return
     personal.record_usage(cache, interaction.user.id, 'recordatorio')
     await interaction.response.send_message(
-        f"{identity.CAT} Listo. Te aviso a las {saved['due']}: {saved['text']}", ephemeral=True)
+        f"{identity.CAT} Listo ({saved['timezone']}) {saved['due']}: {saved['text']}", ephemeral=True)
 
-@client.tree.command(name='buscar',description='Búsqueda breve (DuckDuckGo instant answer)')
+@client.tree.command(name='buscar',description='Búsqueda breve, sin URLs ni shell')
 async def buscar(interaction, consulta:str):
     if not await guard(interaction): return
     await interaction.response.defer(ephemeral=True)
@@ -199,6 +224,10 @@ async def daily_report(interaction):
 
 async def control_prompt(interaction, action, reason):
     if not await guard(interaction): return
+    try:
+        reason = bounded(reason, minimum=3, maximum=MAX_REASON, field='motivo')
+    except ValueError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True); return
     payload={'interaction_id':str(interaction.id),'reason':reason}
     async def execute(confirm_interaction):
         return await call('/internal/discord/'+action,confirm_interaction,'POST',payload)
@@ -220,6 +249,10 @@ async def paper_order(interaction, side:app_commands.Choice[str], stop_loss:floa
     if not await guard(interaction): return
     if risk_percent <= 0 or risk_percent > .25:
         await interaction.response.send_message('El riesgo debe estar entre 0 y 0.25%.',ephemeral=True); return
+    try:
+        reason = bounded(reason, minimum=3, maximum=MAX_REASON, field='motivo')
+    except ValueError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True); return
     payload={'interaction_id':str(interaction.id),'side':side.value,'stop_loss':str(stop_loss),
         'take_profit':str(take_profit),'risk_percent':str(risk_percent),'reason':reason}
     async def execute(confirm_interaction):
@@ -231,6 +264,11 @@ async def paper_order(interaction, side:app_commands.Choice[str], stop_loss:floa
 @client.tree.command(name='paper_close',description='Cerrar una posición manual simulada')
 async def paper_close(interaction, position_id:str, reason:str):
     if not await guard(interaction): return
+    try:
+        position_id = bounded(position_id, minimum=1, maximum=MAX_POSITION_ID, field='position_id')
+        reason = bounded(reason, minimum=3, maximum=MAX_REASON, field='motivo')
+    except ValueError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True); return
     payload={'interaction_id':str(interaction.id),'position_id':position_id,'reason':reason}
     async def execute(confirm_interaction):
         return await call('/internal/discord/paper-close',confirm_interaction,'POST',payload)
@@ -238,10 +276,12 @@ async def paper_close(interaction, position_id:str, reason:str):
         view=Confirm(interaction.user.id,execute),ephemeral=True)
 
 def main():
+    global lock
     if not settings.enabled: raise SystemExit('Discord bot is disabled')
     if not all((settings.token,settings.api_key,settings.guild_id,settings.admin_role_id,settings.allowed_user_ids)):
         raise SystemExit('Discord bot configuration is incomplete')
-    gateway_lock.acquire(cache, settings.token)
+    lock = gateway_lock.GatewayLock(settings.token)
+    lock.acquire(cache)
     client.run(settings.token, log_handler=None)
 
 if __name__ == '__main__': main()

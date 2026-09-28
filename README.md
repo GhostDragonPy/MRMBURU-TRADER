@@ -3,7 +3,7 @@
 Base de investigación de trading automatizado. Continúa v0.2/v0.3.
 **Solo paper. La API reporta `0.4.0`. cTrader es solo lectura: no envía órdenes al broker.**
 
-Detalle del simulador EURUSD/USD: [`docs/PAPER_V04.md`](docs/PAPER_V04.md).
+Detalle Esses: [`docs/ESSES_V1.md`](docs/ESSES_V1.md). Demo-orders (desactivado): [`docs/DEMO_ORDERS.md`](docs/DEMO_ORDERS.md).
 
 ## Arrancar en Linux
 

@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from unittest.mock import Mock
 import pytest
 
@@ -132,11 +133,14 @@ def transport(session=None, **kw):
 
 
 def run_official(db, t, events=None, rollout='enabled'):
+    from services.demo_orders.preflight import record_preflight
     db.get(KillSwitch, 1).active = False
     demo = service.control(db)
     demo.rollout = rollout
     demo.blocked = False
     demo.protection_failed = False
+    demo.armed_at = NOW - timedelta(seconds=5)
+    record_preflight(db, demo_settings(), now=NOW - timedelta(seconds=5))
     return service.on_paper_cycle(
         db, demo_settings(), {'events': events or [opened_event()]},
         now=NOW, gateway=DemoCTraderExecutionGateway(t), token_scope='trading')

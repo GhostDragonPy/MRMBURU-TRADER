@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     allow_live_trading: Literal[False] = False
     demo_execution_enabled: bool = False
     demo_ctrader_account_id: Optional[str] = None
+    signal_max_age_seconds: int = Field(default=90, ge=5, le=600)
+    demo_preflight_ttl_seconds: int = Field(default=86400, ge=60, le=604800)
     esses_broker_execution: bool = False
     paper_scheduler_enabled: bool = False
     paper_account_id: Optional[str] = None

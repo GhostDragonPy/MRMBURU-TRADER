@@ -35,9 +35,13 @@ def paper_loop(settings, factory, cache, stop):
                         from services.ctrader import tokens as token_store
                         from services.demo_orders.factory import build_gateway
                         from services.demo_orders.service import on_paper_cycle
+                        scope = token_store.effective_scope(cache) or 'accounts'
+                        gw = build_gateway(settings, cache, db_session=session, token_scope=scope)
                         on_paper_cycle(session, settings, result, now=datetime.now(timezone.utc),
-                            gateway=build_gateway(settings, cache),
-                            token_scope=token_store.effective_scope(cache) or 'accounts')
+                            gateway=gw, token_scope=scope, redis_client=cache)
+                        closer = getattr(gw.transport, 'close', None)
+                        if closer:
+                            closer()
                 else:
                     result = cycle(session, feed_from_settings(settings, cache),
                         settings.paper_account_id,

@@ -147,9 +147,16 @@ def mount(app, *, settings, factory, redis_client, db):
         from services.ctrader import tokens as token_store
         from services.demo_orders.service import status_payload
         audit_read(session, user, 'demo_status')
-        payload = status_payload(session, settings, token_store.effective_scope(redis_client))
+        payload = status_payload(session, settings, token_store.effective_scope(redis_client),
+                                 redis_client=redis_client)
         payload['allow_live_trading'] = False
         return payload
+
+    @app.get('/internal/discord/demo-preflight')
+    def demo_preflight_status(user=Depends(authorized), session=Depends(db)):
+        from services.demo_orders.preflight import public_preflight
+        audit_read(session, user, 'demo_preflight')
+        return public_preflight(session, settings)
 
     @app.post('/internal/discord/demo-emergency-stop')
     def demo_emergency_stop(body:DiscordControl, user=Depends(authorized), session=Depends(db)):
@@ -171,8 +178,12 @@ def mount(app, *, settings, factory, redis_client, db):
         confirmed = body.get('confirmed') is True
         interaction_id = body.get('interaction_id','')
         reason = body.get('reason','rollout')
+        if body.get('execution_enabled') or body.get('demo_execution_enabled') is True:
+            raise HTTPException(403, 'Discord cannot enable execution')
         if target == 'live' or body.get('allow_live_trading'):
             raise HTTPException(403, 'LIVE trading cannot be enabled')
+        if body.get('demo_ctrader_account_id') or body.get('host') or body.get('ctrader_environment') == 'live':
+            raise HTTPException(403, 'Discord cannot select accounts or hosts')
         def execute():
             try:
                 return advance_rollout(session, target, confirmed=confirmed)

@@ -13,7 +13,7 @@ CAT = '🐈'
 ADMIN_COMMANDS = (
     'status', 'positions', 'history', 'daily_report',
     'pause', 'resume', 'paper_order', 'paper_close', 'broker_order',
-    'demo_status', 'demo_emergency_stop',
+    'demo_status', 'demo_emergency_stop', 'demo_preflight',
 )
 PERSONAL_COMMANDS = ('ayuda', 'identidad', 'clima', 'tokens', 'recordatorio', 'buscar')
 
@@ -36,7 +36,7 @@ def help_text():
         'Los comandos se autorizan por ID de guild, canal, usuario y rol, no por nombres. '
         'Pausa/reanudación solo afecta entradas automáticas paper. '
         '`/paper_order` y `/paper_close` usan la cuenta aislada `discord-sandbox`. '
-        '`/demo_status` y `/demo_emergency_stop` cubren demo-orders. '
+        '`/demo_status`, `/demo_preflight` y `/demo_emergency_stop` cubren demo-orders. '
         '`/pause` detiene entradas nuevas paper y demo, no cierra posiciones.'
     )
 

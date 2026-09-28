@@ -140,11 +140,31 @@ class DemoControl(Base):
     blocked = Column(Boolean, nullable=False, default=False)
     protection_failed = Column(Boolean, nullable=False, default=False)
     canary_day = Column(String(16), nullable=True)
+    canary_consumed = Column(Boolean, nullable=False, default=False)
+    armed_at = Column(DateTime(timezone=True), nullable=True)
     reason = Column(Text, nullable=False, default='initial')
     changed_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
     __table_args__ = (
         CheckConstraint('id = 1', name='demo_control_singleton'),
         CheckConstraint("rollout IN ('disabled','shadow','canary','enabled')", name='demo_rollout_states'),
+    )
+
+class DemoPreflight(Base):
+    __tablename__ = 'demo_preflight'
+    id = Column(Integer, primary_key=True)
+    account_id = Column(String(64), nullable=False)
+    is_live = Column(Boolean, nullable=False, default=False)
+    host = Column(String(128), nullable=False)
+    symbol = Column(String(16), nullable=False)
+    status = Column(String(16), nullable=False)
+    fingerprint = Column(String(64), nullable=False)
+    checked_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    detail = Column(JSON, nullable=False, default=dict)
+    __table_args__ = (
+        CheckConstraint('id = 1', name='demo_preflight_singleton'),
+        CheckConstraint("status IN ('passed','failed')", name='demo_preflight_status'),
+        CheckConstraint('is_live = false', name='demo_preflight_not_live'),
     )
 
 class DemoOrderIntent(Base):

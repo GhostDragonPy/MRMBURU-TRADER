@@ -9,6 +9,7 @@ from core.models import AuditEvent, AutomaticPaperControl, DemoControl, DemoOrde
 from services.ctrader.stream import active as esses_window
 from services.demo_orders.gateway import DemoCTraderExecutionGateway, UncertainBrokerResult
 from services.demo_orders.guards import DemoGuardError, next_rollout, reject_live_identity
+from services.demo_orders.preflight import mask_account, public_preflight, require_preflight
 
 D = Decimal
 MAX_RISK = D('0.0025')
@@ -25,7 +26,8 @@ def control(session):
     row = session.get(DemoControl, 1)
     if row is None:
         row = DemoControl(id=1, rollout='disabled', blocked=False, protection_failed=False,
-                          reason='initial', changed_at=datetime.now(timezone.utc))
+                          canary_consumed=False, reason='initial',
+                          changed_at=datetime.now(timezone.utc))
         session.add(row)
         session.flush()
     return row
@@ -52,7 +54,44 @@ def _normalize_volume(units, instrument, canary=False):
     return qty
 
 
-def on_paper_cycle(session, settings, result, *, now, gateway, token_scope, paused=None):
+def _signal_born_at(position):
+    raw = position.get('bar')
+    if not raw:
+        raise DemoGuardError('SIGNAL_TIMESTAMP_MISSING')
+    born = datetime.fromisoformat(str(raw).replace('Z', '+00:00'))
+    if born.tzinfo is None:
+        born = born.replace(tzinfo=timezone.utc)
+    return born
+
+
+def _freshness(settings, demo, position, now):
+    born = _signal_born_at(position)
+    if demo.armed_at is None:
+        raise DemoGuardError('DEMO_NOT_ARMED')
+    armed = demo.armed_at if demo.armed_at.tzinfo else demo.armed_at.replace(tzinfo=timezone.utc)
+    if born <= armed:
+        raise DemoGuardError('SIGNAL_BEFORE_ARM')
+    max_age = int(getattr(settings, 'signal_max_age_seconds', 90) or 90)
+    if (now - born).total_seconds() > max_age:
+        raise DemoGuardError('SIGNAL_EXPIRED')
+    return born
+
+
+def _dependencies(session, redis_client):
+    session.execute(select(KillSwitch).where(KillSwitch.id == 1))
+    if redis_client is None:
+        return
+    try:
+        if not redis_client.ping():
+            raise DemoGuardError('REDIS_UNAVAILABLE')
+    except DemoGuardError:
+        raise
+    except Exception as exc:
+        raise DemoGuardError('REDIS_UNAVAILABLE') from exc
+
+
+def on_paper_cycle(session, settings, result, *, now, gateway, token_scope, paused=None,
+                   redis_client=None):
     if settings.trading_mode != 'demo-orders':
         return {'skipped': 'paper-mode'}
     gate = session.get(KillSwitch, 1)
@@ -71,6 +110,7 @@ def on_paper_cycle(session, settings, result, *, now, gateway, token_scope, paus
             environment=gateway.transport.environment,
             scope=token_scope,
         )
+        _dependencies(session, redis_client)
     except DemoGuardError as exc:
         _block_demo(session, str(exc))
         return {'blocked': str(exc)}
@@ -117,16 +157,33 @@ def _handle_open(session, settings, event, now, gateway: DemoCTraderExecutionGat
                 'status': existing.status if existing else 'reserved'}
     if demo.rollout == 'shadow':
         intent.status = 'shadow'
-        intent.response = {'proposed': payload, 'sent': False}
+        intent.response = {'proposed': {
+            'symbol': 'EURUSD', 'side': position['side'], 'units': str(position.get('units')),
+            'stop_loss': str(position.get('stop')), 'take_profit': str(position.get('target')),
+            'entry': str(position.get('entry') or ''), 'reason': position.get('context', {}).get('models'),
+        }, 'sent': False}
         session.add(AuditEvent(actor='demo-orders', action='demo.shadow',
                                payload={'signal_id': signal_id}))
         return {'signal_id': signal_id, 'status': 'shadow'}
+    try:
+        require_preflight(session, settings, now=now)
+        _freshness(settings, demo, position, now)
+    except DemoGuardError as exc:
+        intent.status = 'failed'
+        intent.response = {'reason': str(exc)}
+        return {'signal_id': signal_id, 'status': 'failed', 'reason': str(exc)}
     if not position.get('stop') or not position.get('target'):
         intent.status = 'failed'
         intent.response = {'reason': 'SL_TP_REQUIRED'}
         return {'signal_id': signal_id, 'status': 'failed', 'reason': 'SL_TP_REQUIRED'}
     risk = D(position.get('risk') or 0)
-    snap = gateway.snapshot()
+    try:
+        snap = gateway.snapshot()
+    except DemoGuardError as exc:
+        intent.status = 'failed'
+        intent.response = {'reason': str(exc)}
+        _block_demo(session, 'BROKER_UNAVAILABLE')
+        return {'signal_id': signal_id, 'status': 'failed', 'reason': 'BROKER_UNAVAILABLE'}
     equity = D(snap['equity'])
     if risk > equity * MAX_RISK:
         intent.status = 'failed'
@@ -151,11 +208,23 @@ def _handle_open(session, settings, event, now, gateway: DemoCTraderExecutionGat
         return {'signal_id': signal_id, 'status': 'failed', 'reason': 'DAILY_LOSS_LIMIT'}
     instrument = snap['instrument']
     canary = demo.rollout == 'canary'
-    if canary and demo.canary_day == today:
+    if canary and (demo.canary_consumed or demo.canary_day == today):
         intent.status = 'failed'
         intent.response = {'reason': 'CANARY_ALREADY_USED'}
         return {'signal_id': signal_id, 'status': 'failed'}
-    volume = _normalize_volume(position['units'], instrument, canary=canary)
+    try:
+        volume = _normalize_volume(position['units'], instrument, canary=canary)
+    except DemoGuardError as exc:
+        intent.status = 'failed'
+        intent.response = {'reason': str(exc)}
+        return {'signal_id': signal_id, 'status': 'failed', 'reason': str(exc)}
+    paper_units = D(position['units'])
+    if paper_units > 0 and volume > paper_units:
+        scaled = risk * (D(volume) / paper_units)
+        if scaled > equity * MAX_RISK:
+            intent.status = 'failed'
+            intent.response = {'reason': 'VOLUME_EXCEEDS_RISK'}
+            return {'signal_id': signal_id, 'status': 'failed', 'reason': 'VOLUME_EXCEEDS_RISK'}
     order = {
         'symbol': 'EURUSD',
         'side': position['side'],
@@ -163,6 +232,8 @@ def _handle_open(session, settings, event, now, gateway: DemoCTraderExecutionGat
         'stop_loss': str(position['stop']),
         'take_profit': str(position['target']),
         'signal_id': signal_id,
+        'entry': str(position.get('entry') or ''),
+        'reason': position.get('context', {}).get('models'),
     }
     if gate_after_send_killed(session):
         intent.status = 'failed'
@@ -214,18 +285,22 @@ def _fill(session, intent, demo, result, today, canary):
         session.add(DemoOwnedPosition(position_id=intent.position_id, signal_id=intent.signal_id))
     if canary:
         demo.canary_day = today
+        demo.canary_consumed = True
     session.add(AuditEvent(actor='demo-orders', action='demo.filled',
                            payload={'signal_id': intent.signal_id, 'order_id': intent.broker_order_id}))
     return {'signal_id': intent.signal_id, 'status': 'filled', 'order_id': intent.broker_order_id}
 
 
-def advance_rollout(session, target, *, confirmed):
+def advance_rollout(session, target, *, confirmed, now=None):
     if not confirmed:
         raise DemoGuardError('Administrative confirmation required')
     demo = control(session)
     demo.rollout = next_rollout(demo.rollout, target)
-    demo.changed_at = datetime.now(timezone.utc)
+    stamp = now or datetime.now(timezone.utc)
+    demo.changed_at = stamp
     demo.reason = 'rollout:' + target
+    if target == 'shadow' and demo.armed_at is None:
+        demo.armed_at = stamp
     session.add(AuditEvent(actor='admin', action='demo.rollout', payload={'rollout': demo.rollout}))
     return {'rollout': demo.rollout}
 
@@ -239,16 +314,40 @@ def emergency_stop(session, reason):
     return {'blocked': True, 'rollout': demo.rollout, 'positions_closed': False}
 
 
-def status_payload(session, settings, token_scope):
+def status_payload(session, settings, token_scope, *, redis_client=None):
+    from services.ctrader.stream import active
     demo = control(session)
+    last = session.scalars(select(DemoOrderIntent).order_by(DemoOrderIntent.created_at.desc())).first()
+    paused = session.get(AutomaticPaperControl, 1)
+    ny_now = datetime.now(timezone.utc)
+    transport = 'unconfigured'
+    if settings.trading_mode == 'demo-orders' and settings.demo_execution_enabled and demo.rollout in ('canary', 'enabled'):
+        try:
+            require_preflight(session, settings, now=ny_now)
+            transport = 'official-demo'
+        except DemoGuardError:
+            transport = 'unconfigured'
     return {
         'trading_mode': settings.trading_mode,
         'rollout': demo.rollout,
+        'transport': transport,
+        'preflight': public_preflight(session, settings),
+        'connection': 'idle',
         'blocked': demo.blocked,
         'protection_failed': demo.protection_failed,
-        'demo_account': settings.demo_ctrader_account_id,
+        'emergency_stop': demo.blocked,
+        'demo_account': mask_account(settings.demo_ctrader_account_id),
+        'strategy': settings.paper_strategy,
+        'ny_window': active(ny_now),
+        'paused': bool(paused and paused.paused),
+        'last_signal': last.signal_id if last else None,
+        'last_order': last.broker_order_id if last else None,
+        'block_reason': demo.reason if demo.blocked else None,
         'scope': token_scope,
         'allow_live_trading': False,
         'execution_enabled': False,
+        'demo_execution_enabled': bool(settings.demo_execution_enabled),
         'paper_available': True,
+        'canary_consumed': bool(demo.canary_consumed),
+        'armed_at': demo.armed_at.isoformat() if demo.armed_at else None,
     }

@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import pytest
 from pydantic import ValidationError
@@ -79,12 +79,19 @@ def opened_event(risk='20', units='1000'):
 
 
 def run(session, settings, events, transport, kill=False, rollout='enabled', reset=True, **kw):
+    seed_preflight = kw.pop('seed_preflight', True)
     session.get(KillSwitch, 1).active = kill
     demo = service.control(session)
     demo.rollout = rollout
     if reset:
         demo.blocked = False
         demo.protection_failed = False
+        demo.canary_consumed = False
+    if rollout in ('canary', 'enabled') and seed_preflight:
+        if demo.armed_at is None:
+            demo.armed_at = NOW - timedelta(seconds=5)
+        from services.demo_orders.preflight import record_preflight
+        record_preflight(session, settings, now=NOW - timedelta(seconds=5), ttl_seconds=86400)
     gw = DemoCTraderExecutionGateway(transport)
     return service.on_paper_cycle(session, settings, {'events': events}, now=NOW,
                                   gateway=gw, token_scope=transport.scope, **kw)
@@ -278,6 +285,7 @@ def test_outside_window_blocked(factory):
         session.get(KillSwitch, 1).active = False
         demo = service.control(session)
         demo.rollout = 'enabled'
+        demo.armed_at = night - timedelta(seconds=5)
         out = service.on_paper_cycle(session, demo_settings(), {'events': [opened_event()]},
                                      now=night, gateway=DemoCTraderExecutionGateway(transport),
                                      token_scope='trading')

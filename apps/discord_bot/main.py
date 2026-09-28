@@ -18,7 +18,7 @@ INTERNAL_PATHS = frozenset({
     '/internal/discord/paper-order', '/internal/discord/paper-close',
     '/internal/discord/broker-order',
     '/internal/discord/demo-status', '/internal/discord/demo-emergency-stop',
-    '/internal/discord/demo-rollout',
+    '/internal/discord/demo-rollout', '/internal/discord/demo-preflight',
     '/internal/discord/pause', '/internal/discord/resume',
 })
 
@@ -304,6 +304,12 @@ async def demo_status(interaction):
 @client.tree.command(name='demo_emergency_stop',description='Detener entradas demo-orders; no cierra posiciones')
 async def demo_emergency_stop(interaction, reason:str):
     await control_prompt(interaction,'demo-emergency-stop',reason)
+
+@client.tree.command(name='demo_preflight',description='Consulta el último preflight DEMO (sin credenciales)')
+async def demo_preflight(interaction):
+    if not await guard(interaction): return
+    await interaction.response.defer(ephemeral=True)
+    await interaction.followup.send(render(await call('/internal/discord/demo-preflight',interaction)),ephemeral=True)
 
 def main():
     global lock

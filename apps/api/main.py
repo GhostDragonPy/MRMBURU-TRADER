@@ -304,10 +304,10 @@ def create_app(settings=None, factory=None, redis_client=None):
                 'note': 'Trading scope is stored separately; live accounts remain forbidden.'}
 
     def _set_prop_sim_cookie(response, tx_id, ttl=600):
-        from services.ctrader.oauth_tx import COOKIE_NAME
+        from services.ctrader.oauth_tx import COOKIE_NAME, COOKIE_PATH
         response.set_cookie(
             key=COOKIE_NAME, value=tx_id, max_age=int(ttl), httponly=True,
-            secure=True, samesite='lax', path='/research/ctrader/prop-sim')
+            secure=True, samesite='none', path=COOKIE_PATH)
         return response
 
     @app.get('/market/ctrader/authorize-prop-sim', dependencies=[Depends(research)])
@@ -372,15 +372,22 @@ def create_app(settings=None, factory=None, redis_client=None):
                 'scope': 'accounts', 'execution_usable': False}
 
     @app.get('/research/ctrader/callback', response_class=HTMLResponse)
-    def ctrader_callback(code: str = '', state: str = '', error: str = '', access_token: str = ''):
+    def ctrader_callback(request: Request, code: str = '', state: str = '', error: str = '',
+                         access_token: str = ''):
         from services.ctrader import tokens as token_store
-        from services.ctrader import oauth_state
+        from services.ctrader import oauth_state, oauth_tx
         if error:
             return HTMLResponse('<h1>cTrader OAuth error</h1><p>Authorization was rejected.</p>', status_code=400)
         state_present = bool(state)
         state_data = oauth_state.consume(settings, redis_client, state) if state_present else None
         state_valid = bool(state_data) and state_data.get('purpose') == 'market-data'
         if not state_valid:
+            if code and oauth_tx.peek_active(redis_client):
+                target = oauth_tx.PROP_SIM_CALLBACK_PATH
+                query = request.url.query
+                if query:
+                    target = f'{target}?{query}'
+                return RedirectResponse(target, status_code=302)
             return HTMLResponse(
                 '<h1>OAuth rejected</h1><p>Missing or invalid state. Fail closed. '
                 f'state_present={str(state_present).lower()} state_valid=false</p>',
@@ -410,7 +417,7 @@ def create_app(settings=None, factory=None, redis_client=None):
         if error:
             return HTMLResponse('<h1>cTrader OAuth error</h1><p>Authorization was rejected.</p>', status_code=400)
         tx_id = request.cookies.get(oauth_tx.COOKIE_NAME, '')
-        pending = oauth_tx.consume(redis_client, tx_id)
+        pending = oauth_tx.consume_correlated(redis_client, tx_id)
         state_present = bool(state)
         state_data = oauth_state.consume(settings, redis_client, state) if state_present else None
         state_valid = bool(state_data) and state_data.get('purpose') == 'prop-sim'
@@ -430,7 +437,8 @@ def create_app(settings=None, factory=None, redis_client=None):
             return HTMLResponse('<h1>Missing code</h1><p>Restart authorize-prop-sim.</p>', status_code=400)
         try:
             payload = ctrader.exchange_code(
-                settings, code, redirect_uri=settings.ctrader_prop_sim_redirect_uri)
+                settings, code,
+                redirect_uri=pending.get('redirect_uri') or settings.ctrader_prop_sim_redirect_uri)
             if payload.get('errorCode') or payload.get('error'):
                 return HTMLResponse('<h1>Token exchange failed</h1><p>Broker rejected the code.</p>', status_code=400)
             public = complete_oauth(
@@ -438,7 +446,7 @@ def create_app(settings=None, factory=None, redis_client=None):
                 {'purpose': 'prop-sim', 'expected_account': pending['expected_account']},
                 list_accounts=lambda token, host: _prop_sim_account_list(settings, token, host))
             response = HTMLResponse(_oauth_html(public))
-            response.delete_cookie(oauth_tx.COOKIE_NAME, path='/research/ctrader/prop-sim')
+            response.delete_cookie(oauth_tx.COOKIE_NAME, path=oauth_tx.COOKIE_PATH)
             return response
         except (CTraderAuthRequired, CTraderUnavailable):
             return HTMLResponse('<h1>cTrader unavailable</h1><p>Try again later.</p>', status_code=503)

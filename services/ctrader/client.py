@@ -95,7 +95,7 @@ def authorization_url_prop_sim(settings, redis_client):
         settings, redis_client, purpose='prop-sim', expected_account=expected, scope='trading')
     tx = oauth_tx.begin(
         redis_client, purpose='prop-sim', expected_account=expected,
-        expected_scope='trading', state=state)
+        expected_scope='trading', state=state, redirect_uri=redirect)
     query = urlencode({
         'client_id': settings.ctrader_client_id.get_secret_value(),
         'redirect_uri': redirect,

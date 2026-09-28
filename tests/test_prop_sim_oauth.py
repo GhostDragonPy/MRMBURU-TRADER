@@ -320,3 +320,26 @@ def test_prop_sim_callback_rejects_view_unbound_mismatch(factory, monkeypatch):
         assert r.status_code == 400
     assert token_store.load_prop_sim_access_token(cache3) is None
     assert token_store.load_access_token(cache3) == 'md'
+
+
+def test_active_txn_correlates_without_cookie_or_state(factory, monkeypatch):
+    cache = Cache()
+    cfg = prop_settings()
+    token_store.save_market_data_tokens(cache, {'access_token': 'md', 'expires_in': 3600})
+    client, captured, headers = _client(cfg, factory, cache, monkeypatch)
+    with client:
+        issued = client.get('/market/ctrader/authorize-prop-sim', headers=headers)
+        assert issued.status_code == 200
+        client.cookies.clear()
+        hop = client.get('/research/ctrader/callback', params={'code': 'from-broker'},
+                         follow_redirects=False)
+        assert hop.status_code == 302
+        assert '/research/ctrader/prop-sim/callback' in hop.headers['location']
+        client.cookies.clear()
+        r = client.get(hop.headers['location'])
+        assert r.status_code == 200, r.text
+        assert b'purpose: prop-sim' in r.content
+        assert b'****4978' in r.content
+        assert b'scope: TRADE' in r.content
+    assert token_store.load_access_token(cache) == 'md'
+    assert token_store.load_prop_sim_access_token(cache) == 'prop-sim-token'

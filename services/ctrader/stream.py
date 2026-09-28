@@ -9,7 +9,9 @@ from time import monotonic
 from zoneinfo import ZoneInfo
 
 from ctrader_open_api.messages.OpenApiCommonMessages_pb2 import ProtoHeartbeatEvent
-from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOASpotEvent, ProtoOASubscribeSpotsReq, ProtoOASubscribeLiveTrendbarReq
+from ctrader_open_api.messages.OpenApiMessages_pb2 import (
+    ProtoOAGetTrendbarsReq, ProtoOASpotEvent, ProtoOASubscribeSpotsReq, ProtoOASubscribeLiveTrendbarReq,
+)
 from ctrader_open_api.messages.OpenApiModelMessages_pb2 import ProtoOATrendbarPeriod
 from services.ctrader.client import open_demo
 from services.ctrader.feed import LiveCTraderFeed, PERIODS
@@ -95,6 +97,24 @@ class ConnectedFeed(LiveCTraderFeed):
             raise CTraderUnavailable('Exact EURUSD symbol unavailable')
         return self.symbols_by_name[name.upper()]
 
+    def ohlc(self, symbol, timeframe, count=100):
+        period_name = timeframe.upper()
+        if period_name not in PERIODS:
+            raise CTraderUnavailable(f'Unsupported timeframe {timeframe}')
+        count = max(1, min(int(count), 200))
+        now = datetime.now(timezone.utc)
+        info = self._find_symbol(self.connection, symbol)
+        response = self.connection.request(ProtoOAGetTrendbarsReq(
+            ctidTraderAccountId=self.account_id, symbolId=info.symbolId,
+            period=ProtoOATrendbarPeriod.Value(period_name),
+            fromTimestamp=int((now - timedelta(minutes=PERIODS[period_name] * count * 2)).timestamp() * 1000),
+            toTimestamp=int(now.timestamp() * 1000), count=count,
+        ))
+        bars = []
+        for row in response.trendbar[-count:]:
+            bars.append(decode_bar(row, period_name))
+        return [b for b in sorted(bars, key=lambda bar: bar.closed_at) if b.closed_at <= now]
+
 
 def decode_bar(row, tf):
     low = D(row.low)/100000
@@ -143,12 +163,12 @@ def collect_session(settings, cache, stop, lock):
         light = feed._find_symbol(connection, 'EURUSD')
         meta = feed.instrument('EURUSD')
         cache.set(key+':instrument', meta.model_dump_json(), ex=604800)
-        books = {}
-        for tf in FRAMES:
-            books[tf] = feed.ohlc('EURUSD', tf, 30 if tf == 'D1' else 200)
-            cache.set(key+':bars:'+tf, json.dumps([b.model_dump(mode='json') for b in books[tf]]), ex=604800)
+        books = {tf: [] for tf in FRAMES}
         connection.request(ProtoOASubscribeSpotsReq(ctidTraderAccountId=feed.account_id,
             symbolId=[light.symbolId], subscribeToSpotTimestamp=True))
+        for tf in ('M1', 'M15'):
+            books[tf] = feed.ohlc('EURUSD', tf, 40)
+            cache.set(key+':bars:'+tf, json.dumps([b.model_dump(mode='json') for b in books[tf]]), ex=604800)
         for tf in FRAMES:
             connection.request(ProtoOASubscribeLiveTrendbarReq(ctidTraderAccountId=feed.account_id,
                 symbolId=light.symbolId, period=ProtoOATrendbarPeriod.Value(tf)))
@@ -191,17 +211,19 @@ def collector_loop(settings, cache, stop):
                 continue
             collect_session(settings, cache, stop, lock)
         except Exception as exc:
-            logging.error('Collector stopped: %s', type(exc).__name__)
+            logging.error('Collector stopped: %s', exc)
             try:
                 cache.set(key+':status', 'error:'+type(exc).__name__, ex=300)
                 cache.delete(key+':tick')
             except Exception:
                 pass
+            delay = 120 if 'rate limited' in str(exc).lower() else 300
+        else:
+            delay = 300
         finally:
             if acquired:
                 try:
                     lock.release()
                 except Exception:
                     pass
-        # No reconnect storm. The global budget still bounds every attempted write.
-        stop.wait(300)
+        stop.wait(delay)

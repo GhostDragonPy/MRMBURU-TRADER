@@ -27,6 +27,19 @@ def active(now):
     return local.weekday() < 5 and 555 <= local.hour*60+local.minute < 670
 
 
+def fx_open(now):
+    """Spot FX session: Sunday 17:00 NY through Friday 17:00 NY."""
+    local = now.astimezone(ZoneInfo('America/New_York'))
+    weekday, minutes = local.weekday(), local.hour * 60 + local.minute
+    if weekday == 5:
+        return False
+    if weekday == 4 and minutes >= 17 * 60:
+        return False
+    if weekday == 6 and minutes < 17 * 60:
+        return False
+    return True
+
+
 class CachedFeed:
     def __init__(self, settings, cache):
         self.cache, self.prefix = cache, prefix(settings)
@@ -142,7 +155,7 @@ def collect_session(settings, cache, stop, lock):
         cache.set(key+':status', 'connected', ex=30)
         quotes = {}
         beat = 0
-        while not stop.is_set() and active(datetime.now(timezone.utc)):
+        while not stop.is_set() and fx_open(datetime.now(timezone.utc)):
             if monotonic()-beat >= 9:
                 # Renew ownership BEFORE any outbound write, including heartbeat.
                 lock.extend(300, replace_ttl=True)
@@ -166,7 +179,7 @@ def collect_session(settings, cache, stop, lock):
 def collector_loop(settings, cache, stop):
     key = prefix(settings)
     while not stop.is_set():
-        if not settings.ctrader_network_enabled or not active(datetime.now(timezone.utc)):
+        if not settings.ctrader_network_enabled or not fx_open(datetime.now(timezone.utc)):
             stop.wait(10)
             continue
         lock = cache.lock(key+':owner', timeout=300, blocking=False)

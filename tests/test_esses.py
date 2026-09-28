@@ -98,11 +98,13 @@ def test_models_can_be_tested_separately():
 
 
 def test_ny_session_uses_dst():
-    from services.ctrader.stream import active
+    from services.ctrader.stream import active, fx_open
     assert active(datetime(2026,9,22,13,30,tzinfo=timezone.utc))
     assert not active(datetime(2026,9,22,12,30,tzinfo=timezone.utc))
     assert active(datetime(2026,1,20,14,30,tzinfo=timezone.utc))
     assert not active(datetime(2026,1,20,13,30,tzinfo=timezone.utc))
+    assert fx_open(datetime(2026,9,28,5,0,tzinfo=timezone.utc))
+    assert not fx_open(datetime(2026,9,26,22,0,tzinfo=timezone.utc))
 
 
 def test_cisd_anchor_and_doji_boundary():

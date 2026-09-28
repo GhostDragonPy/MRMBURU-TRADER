@@ -266,7 +266,7 @@ def create_app(settings=None, factory=None, redis_client=None):
         except CTraderAuthRequired as exc:
             raise HTTPException(401, str(exc)) from None
         return {'authorization_url': url, 'account_id': settings.ctrader_account_id, 'orders': 'disabled',
-                'scope': 'accounts', 'note': 'Use Account info until the Spotware app is Active. Trading scope needs KYC.'}
+                'scope': 'trading', 'note': 'OAuth requests trading; ExecutionGateway stays disabled.'}
 
     @app.post('/market/ctrader/token', dependencies=[Depends(admin)])
     def ctrader_save_token(body: CtraderTokenBody):
@@ -276,7 +276,7 @@ def create_app(settings=None, factory=None, redis_client=None):
             'refresh_token': body.refresh_token,
             'expires_in': body.expires_in,
         })
-        return {'authorized': True, 'account_id': settings.ctrader_account_id, 'orders': 'disabled', 'scope': 'accounts'}
+        return {'authorized': True, 'account_id': settings.ctrader_account_id, 'orders': 'disabled', 'scope': 'trading'}
 
     @app.get('/research/ctrader/callback', response_class=HTMLResponse)
     def ctrader_callback(code: str = '', state: str = '', error: str = '', access_token: str = ''):
@@ -285,7 +285,7 @@ def create_app(settings=None, factory=None, redis_client=None):
             return HTMLResponse(f'<h1>cTrader OAuth error</h1><p>{error}</p>', status_code=400)
         if access_token:
             token_store.save_tokens(redis_client, {'access_token': access_token, 'expires_in': 86400})
-            return HTMLResponse('<h1>cTrader connected</h1><p>Account info token saved. Orders stay disabled.</p>')
+            return HTMLResponse('<h1>cTrader connected</h1><p>Production token saved. Orders stay disabled.</p>')
         if state and not token_store.consume_state(redis_client, state):
             return HTMLResponse('<h1>Invalid OAuth state</h1><p>Retry /market/ctrader/authorize</p>', status_code=400)
         if not code:
@@ -299,7 +299,7 @@ def create_app(settings=None, factory=None, redis_client=None):
             return HTMLResponse(f'<h1>cTrader unavailable</h1><p>{exc}</p>', status_code=503)
         account = settings.ctrader_account_id or 'unknown'
         return HTMLResponse(
-            f'<h1>cTrader connected</h1><p>Account {account} authorized for account/market data only. Orders stay disabled.</p>'
+            f'<h1>cTrader connected</h1><p>Account {account} token saved. Orders stay disabled.</p>'
         )
 
     @app.get('/market/ctrader/symbols', dependencies=[Depends(research)])

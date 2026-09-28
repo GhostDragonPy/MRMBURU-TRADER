@@ -22,15 +22,28 @@ def _as_text(value):
 
 
 def begin(redis_client, *, purpose, expected_account, expected_scope='trading',
+          expected_login='', expected_broker='ftmo', expected_is_live=True,
           state='', redirect_uri=PROP_SIM_REDIRECT_URI, ttl=600):
     if purpose != 'prop-sim':
         raise ValueError('Only prop-sim transactions are issued here')
     if expected_scope != 'trading':
         raise ValueError('prop-sim OAuth requires trading scope')
+    if str(expected_account) != '48803059':
+        raise ValueError('prop-sim OAuth requires the FTMO ctid')
+    if str(expected_login) != '17204978':
+        raise ValueError('prop-sim OAuth requires the FTMO trader login')
+    if str(expected_broker).strip().lower() != 'ftmo':
+        raise ValueError('prop-sim OAuth requires broker ftmo')
+    if expected_is_live is not True:
+        raise ValueError('prop-sim OAuth requires LIVE infrastructure')
     tx_id = secrets.token_urlsafe(24)
     payload = {
         'purpose': purpose,
         'expected_account': str(expected_account),
+        'expected_ctid_trader_account_id': str(expected_account),
+        'expected_trader_login': str(expected_login),
+        'expected_broker': 'ftmo',
+        'expected_is_live': True,
         'expected_scope': expected_scope,
         'nonce': uuid4().hex,
         'exp': int(time()) + int(ttl),

@@ -422,3 +422,25 @@ def test_prop_sim_account_list_uses_redis(factory, monkeypatch):
     assert captured.get('host') == 'live.ctraderapi.com'
     assert token_store.load_access_token(cache) == 'md'
     assert token_store.load_prop_sim_access_token(cache) == 'prop-sim-token'
+
+
+def test_prop_sim_txn_stores_ftmo_tuple():
+    from services.ctrader import oauth_tx
+    import time
+    cache = Cache()
+    tx = oauth_tx.begin(
+        cache, purpose='prop-sim', expected_account='48803059',
+        expected_login='17204978', expected_broker='ftmo', expected_is_live=True,
+        expected_scope='trading', state='signed-state', ttl=600)
+    stored = oauth_tx.load(cache, tx['id'])
+    assert stored['purpose'] == 'prop-sim'
+    assert stored['expected_ctid_trader_account_id'] == '48803059'
+    assert stored['expected_trader_login'] == '17204978'
+    assert stored['expected_broker'] == 'ftmo'
+    assert stored['expected_is_live'] is True
+    assert stored['expected_scope'] == 'trading'
+    assert stored['exp'] <= int(time.time()) + 600
+    assert stored['exp'] >= int(time.time()) + 500
+    with pytest.raises(ValueError):
+        oauth_tx.begin(cache, purpose='prop-sim', expected_account='17204978',
+                       expected_login='17204978')

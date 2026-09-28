@@ -3,6 +3,7 @@ from services.providers.http import ProviderError, request_form
 from services.ctrader.types import CTraderAuthRequired, CTraderUnavailable
 from services.ctrader import tokens as token_store
 from services.ctrader import oauth_state
+from services.ctrader import oauth_tx
 
 CTRADER_AUTH = 'https://openapi.ctrader.com/apps/auth'
 CTRADER_TOKEN = 'https://openapi.ctrader.com/apps/token'
@@ -66,19 +67,52 @@ def authorization_url(settings, redis_client, *, purpose='market-data'):
     if not configured(settings):
         raise CTraderAuthRequired('cTrader client id/secret are not set')
     expected = ''
+    scope = 'trading'
+    redirect = settings.ctrader_redirect_uri
     if purpose == 'prop-sim':
-        from services.ctrader.prop_sim import expected_account
-        expected = expected_account(settings)
+        return authorization_url_prop_sim(settings, redis_client)
+    elif purpose == 'market-data':
+        scope = 'trading'
     state = oauth_state.issue(
-        settings, redis_client, purpose=purpose, expected_account=expected, scope='trading')
+        settings, redis_client, purpose=purpose, expected_account=expected, scope=scope)
     query = urlencode({
         'client_id': settings.ctrader_client_id.get_secret_value(),
-        'redirect_uri': settings.ctrader_redirect_uri,
-        'scope': 'trading',
+        'redirect_uri': redirect,
+        'scope': scope,
         'product': 'web',
         'state': state,
     })
     return f'{CTRADER_AUTH}?{query}'
+
+
+def authorization_url_prop_sim(settings, redis_client):
+    if not configured(settings):
+        raise CTraderAuthRequired('cTrader client id/secret are not set')
+    from services.ctrader.prop_sim import expected_account
+    expected = expected_account(settings)
+    redirect = getattr(settings, 'ctrader_prop_sim_redirect_uri', oauth_tx.PROP_SIM_REDIRECT_URI)
+    state = oauth_state.issue(
+        settings, redis_client, purpose='prop-sim', expected_account=expected, scope='trading')
+    tx = oauth_tx.begin(
+        redis_client, purpose='prop-sim', expected_account=expected,
+        expected_scope='trading', state=state)
+    query = urlencode({
+        'client_id': settings.ctrader_client_id.get_secret_value(),
+        'redirect_uri': redirect,
+        'scope': 'trading',
+        'product': 'web',
+        'state': state,
+    })
+    return {
+        'authorization_url': f'{CTRADER_AUTH}?{query}',
+        'tx_id': tx['id'],
+        'redirect_uri': redirect,
+        'start_path': f'{oauth_tx.PROP_SIM_START_PATH}?tx={tx["id"]}',
+        'cookie_name': oauth_tx.COOKIE_NAME,
+        'ttl': tx['ttl'],
+        'purpose': 'prop-sim',
+        'expected_account': expected,
+    }
 
 
 def authorization_url_accounts(settings, redis_client):
@@ -96,13 +130,13 @@ def authorization_url_accounts(settings, redis_client):
     return f'{CTRADER_AUTH}?{query}'
 
 
-def exchange_code(settings, code: str):
+def exchange_code(settings, code: str, *, redirect_uri=None):
     if not configured(settings):
         raise CTraderAuthRequired('cTrader client id/secret are not set')
     fields = {
         'grant_type': 'authorization_code',
         'code': code,
-        'redirect_uri': settings.ctrader_redirect_uri,
+        'redirect_uri': redirect_uri or settings.ctrader_redirect_uri,
         'client_id': settings.ctrader_client_id.get_secret_value(),
         'client_secret': settings.ctrader_client_secret.get_secret_value(),
     }

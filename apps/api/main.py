@@ -2,8 +2,8 @@ from contextlib import asynccontextmanager
 from hmac import compare_digest
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
-from fastapi import FastAPI, Depends, Header, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, Depends, Header, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import Field
 from redis import Redis
 from sqlalchemy import select, text
@@ -303,18 +303,51 @@ def create_app(settings=None, factory=None, redis_client=None):
                 'purpose': 'market-data',
                 'note': 'Trading scope is stored separately; live accounts remain forbidden.'}
 
+    def _set_prop_sim_cookie(response, tx_id, ttl=600):
+        from services.ctrader.oauth_tx import COOKIE_NAME
+        response.set_cookie(
+            key=COOKIE_NAME, value=tx_id, max_age=int(ttl), httponly=True,
+            secure=True, samesite='lax', path='/research/ctrader/prop-sim')
+        return response
+
     @app.get('/market/ctrader/authorize-prop-sim', dependencies=[Depends(research)])
     def ctrader_authorize_prop_sim():
+        from services.ctrader.prop_sim import PropSimError
+        from services.ctrader.guards_accounts import mask_account
         try:
-            url = ctrader.authorization_url(settings, redis_client, purpose='prop-sim')
-        except (CTraderAuthRequired, Exception) as exc:
-            from services.ctrader.prop_sim import PropSimError
-            if isinstance(exc, (CTraderAuthRequired, PropSimError)):
-                raise HTTPException(401, str(exc)) from None
-            raise
-        return {'authorization_url': url, 'scope': 'trading', 'orders': 'disabled',
-                'purpose': 'prop-sim', 'execution': 'disabled',
-                'expected_account': '****' + str(settings.prop_sim_ctrader_account_id or '17204978')[-4:]}
+            issued = ctrader.authorization_url_prop_sim(settings, redis_client)
+        except (CTraderAuthRequired, PropSimError) as exc:
+            raise HTTPException(401, str(exc)) from None
+        host = settings.ctrader_prop_sim_redirect_uri.replace('/research/ctrader/prop-sim/callback', '')
+        return {
+            'start_url': host + issued['start_path'],
+            'redirect_uri': issued['redirect_uri'],
+            'scope': 'trading', 'orders': 'disabled',
+            'purpose': 'prop-sim', 'execution': 'disabled',
+            'expected_account': mask_account(issued['expected_account']),
+        }
+
+    @app.get('/research/ctrader/prop-sim/start')
+    def ctrader_prop_sim_start(tx: str = ''):
+        from services.ctrader import oauth_tx
+        from time import time as now
+        pending = oauth_tx.load(redis_client, tx)
+        if not pending or not pending.get('state'):
+            return HTMLResponse('<h1>Invalid prop-sim start</h1><p>Restart authorize-prop-sim.</p>',
+                                status_code=400)
+        if not ctrader.configured(settings):
+            return HTMLResponse('<h1>cTrader not configured</h1>', status_code=503)
+        from urllib.parse import urlencode
+        query = urlencode({
+            'client_id': settings.ctrader_client_id.get_secret_value(),
+            'redirect_uri': settings.ctrader_prop_sim_redirect_uri,
+            'scope': 'trading',
+            'product': 'web',
+            'state': pending['state'],
+        })
+        response = RedirectResponse(f'{ctrader.CTRADER_AUTH}?{query}', status_code=302)
+        _set_prop_sim_cookie(response, pending['id'], ttl=max(int(pending.get('exp') or 0) - int(now()), 60))
+        return response
 
     @app.get('/market/ctrader/authorize', dependencies=[Depends(research)])
     def ctrader_authorize():
@@ -342,31 +375,23 @@ def create_app(settings=None, factory=None, redis_client=None):
     def ctrader_callback(code: str = '', state: str = '', error: str = '', access_token: str = ''):
         from services.ctrader import tokens as token_store
         from services.ctrader import oauth_state
-        from services.ctrader.prop_sim import PropSimError, complete_oauth
         if error:
             return HTMLResponse('<h1>cTrader OAuth error</h1><p>Authorization was rejected.</p>', status_code=400)
-        if access_token:
-            token_store.save_market_data_tokens(
-                redis_client, {'access_token': access_token, 'expires_in': 86400}, scope='accounts')
-            return HTMLResponse(_oauth_html({
-                'purpose': 'market-data', 'account': 'unbound',
-                'environment': 'unchanged', 'scope': 'accounts', 'execution': 'disabled',
-            }))
-        state_data = oauth_state.consume(settings, redis_client, state) if state else None
-        if not state_data:
-            return HTMLResponse('<h1>Invalid OAuth state</h1><p>Retry /market/ctrader/authorize-prop-sim</p>',
-                                status_code=400)
+        state_present = bool(state)
+        state_data = oauth_state.consume(settings, redis_client, state) if state_present else None
+        state_valid = bool(state_data) and state_data.get('purpose') == 'market-data'
+        if not state_valid:
+            return HTMLResponse(
+                '<h1>OAuth rejected</h1><p>Missing or invalid state. Fail closed. '
+                f'state_present={str(state_present).lower()} state_valid=false</p>',
+                status_code=400)
         if not code:
-            return HTMLResponse('<h1>Missing code</h1><p>Restart authorization.</p>', status_code=400)
+            return HTMLResponse('<h1>Missing code</h1><p>Restart market-data authorization.</p>', status_code=400)
         try:
-            payload = ctrader.exchange_code(settings, code)
+            payload = ctrader.exchange_code(
+                settings, code, redirect_uri=settings.ctrader_redirect_uri)
             if payload.get('errorCode') or payload.get('error'):
                 return HTMLResponse('<h1>Token exchange failed</h1><p>Broker rejected the code.</p>', status_code=400)
-            if state_data.get('purpose') == 'prop-sim':
-                public = complete_oauth(
-                    settings, redis_client, payload, state_data,
-                    list_accounts=lambda token, host: _prop_sim_account_list(settings, token, host))
-                return HTMLResponse(_oauth_html(public))
             token_store.save_market_data_tokens(
                 redis_client, payload, scope=state_data.get('scope') or 'accounts')
             return HTMLResponse(_oauth_html({
@@ -374,11 +399,51 @@ def create_app(settings=None, factory=None, redis_client=None):
                 'environment': 'market-data', 'scope': state_data.get('scope') or 'accounts',
                 'execution': 'disabled',
             }))
-        except (CTraderAuthRequired, CTraderUnavailable) as exc:
+        except (CTraderAuthRequired, CTraderUnavailable):
+            return HTMLResponse('<h1>cTrader unavailable</h1><p>Try again later.</p>', status_code=503)
+
+    @app.get('/research/ctrader/prop-sim/callback', response_class=HTMLResponse)
+    def ctrader_prop_sim_callback(request: Request, code: str = '', state: str = '', error: str = ''):
+        from services.ctrader import tokens as token_store
+        from services.ctrader import oauth_state, oauth_tx
+        from services.ctrader.prop_sim import PropSimError, complete_oauth
+        if error:
+            return HTMLResponse('<h1>cTrader OAuth error</h1><p>Authorization was rejected.</p>', status_code=400)
+        tx_id = request.cookies.get(oauth_tx.COOKIE_NAME, '')
+        pending = oauth_tx.consume(redis_client, tx_id)
+        state_present = bool(state)
+        state_data = oauth_state.consume(settings, redis_client, state) if state_present else None
+        state_valid = bool(state_data) and state_data.get('purpose') == 'prop-sim'
+        correlated = bool(pending) and pending.get('purpose') == 'prop-sim'
+        if state_present and not state_valid:
+            correlated = False
+        if state_valid and pending:
+            if str(state_data.get('expected_account')) != str(pending.get('expected_account')):
+                correlated = False
+        if not correlated:
+            return HTMLResponse(
+                '<h1>prop-sim OAuth rejected</h1><p>Missing correlation. Fail closed. '
+                f'state_present={str(state_present).lower()} '
+                f'state_valid={str(state_valid).lower()}</p>',
+                status_code=400)
+        if not code:
+            return HTMLResponse('<h1>Missing code</h1><p>Restart authorize-prop-sim.</p>', status_code=400)
+        try:
+            payload = ctrader.exchange_code(
+                settings, code, redirect_uri=settings.ctrader_prop_sim_redirect_uri)
+            if payload.get('errorCode') or payload.get('error'):
+                return HTMLResponse('<h1>Token exchange failed</h1><p>Broker rejected the code.</p>', status_code=400)
+            public = complete_oauth(
+                settings, redis_client, payload,
+                {'purpose': 'prop-sim', 'expected_account': pending['expected_account']},
+                list_accounts=lambda token, host: _prop_sim_account_list(settings, token, host))
+            response = HTMLResponse(_oauth_html(public))
+            response.delete_cookie(oauth_tx.COOKIE_NAME, path='/research/ctrader/prop-sim')
+            return response
+        except (CTraderAuthRequired, CTraderUnavailable):
             return HTMLResponse('<h1>cTrader unavailable</h1><p>Try again later.</p>', status_code=503)
         except PropSimError as exc:
-            return HTMLResponse(
-                f'<h1>prop-sim authorization rejected</h1><p>{exc}</p>', status_code=400)
+            return HTMLResponse(f'<h1>prop-sim authorization rejected</h1><p>{exc}</p>', status_code=400)
 
     @app.get('/market/ctrader/prop-sim/inventory', dependencies=[Depends(research)])
     def ctrader_prop_sim_inventory():

@@ -1,10 +1,12 @@
 import pytest
+from fastapi.testclient import TestClient
 from ctrader_open_api.messages.OpenApiModelMessages_pb2 import ProtoOAClientPermissionScope
 from services.ctrader import oauth_state, tokens as token_store
 from services.ctrader.prop_sim import PropSimError, complete_oauth, inventory, validate_listed_accounts
 from services.demo_orders.factory import UnconfiguredDemoTransport, build_gateway
 from tests.test_api import Cache, settings
 from tests.test_demo_orders import demo_settings
+from apps.api.main import create_app
 
 
 def prop_settings(**kw):
@@ -135,13 +137,13 @@ def test_oauth_html_and_inventory_never_include_tokens(factory):
     assert '48803059' not in blob
     assert report['accounts'][0]['account'] == '****4978'
     cfg = prop_settings(ctrader_client_id='40796_id', ctrader_client_secret='secret')
+    token_store.save_market_data_tokens(cache, {'access_token': 'md-keep', 'expires_in': 60})
     with TestClient(create_app(cfg, factory, cache)) as client:
         r = client.get('/research/ctrader/callback', params={'access_token': 'another-sandbox-token'})
-        assert r.status_code == 200
+        assert r.status_code == 400
+        assert b'Fail closed' in r.content
         assert b'48803059' not in r.content
-        assert b'market-data' in r.content
-        assert b'Orders stay disabled' in r.content
-    assert token_store.load_access_token(cache) == 'another-sandbox-token'
+    assert token_store.load_access_token(cache) == 'md-keep'
     assert token_store.load_prop_sim_access_token(cache) == 'secret-token-value'
 
 
@@ -169,3 +171,152 @@ def test_inventory_cli_zero_orders(capsys):
     assert 'TRADE' in out
     assert 'md' not in out
     assert 'prop-sim-token' not in out
+
+
+def test_unbound_and_view_scope_rejected():
+    cfg = prop_settings()
+    cache = Cache()
+    with pytest.raises(PropSimError, match='UNBOUND_ACCOUNT'):
+        complete_oauth(cfg, cache, {'access_token': 'x', 'expires_in': 60},
+                       {'purpose': 'prop-sim', 'expected_account': '17204978'},
+                       list_accounts=lambda token, host: {
+                           'permission_scope': ProtoOAClientPermissionScope.SCOPE_TRADE,
+                           'accounts': []})
+    assert token_store.load_prop_sim_access_token(cache) is None
+    with pytest.raises(PropSimError, match='PERMISSION_SCOPE_NOT_TRADE'):
+        complete_oauth(cfg, cache, {'access_token': 'x', 'expires_in': 60},
+                       {'purpose': 'prop-sim', 'expected_account': '17204978'},
+                       list_accounts=lambda token, host: {
+                           'permission_scope': ProtoOAClientPermissionScope.SCOPE_VIEW,
+                           'accounts': [{'ctidTraderAccountId': 17204978, 'isLive': True}]})
+    assert token_store.load_prop_sim_access_token(cache) is None
+
+
+def _client(cfg, factory, cache, monkeypatch, listed=None):
+    import apps.api.main as api_main
+    from tests.test_api import RESEARCH
+    monkeypatch.setattr(api_main, 'PROP_SIM_LIST_ACCOUNTS',
+                        lambda token, host: listed if listed is not None else listed_ok())
+    captured = {}
+    def fake_exchange(settings, code, redirect_uri=None):
+        captured['redirect_uri'] = redirect_uri
+        return {'access_token': 'prop-sim-token', 'refresh_token': 'r', 'expires_in': 3600}
+    monkeypatch.setattr(api_main.ctrader, 'exchange_code', fake_exchange)
+    client = TestClient(create_app(cfg, factory, cache), base_url='https://trader.acshop.shop')
+    return client, captured, {'x-api-key': RESEARCH}
+
+
+def test_missing_state_on_market_callback_fail_closed(factory, monkeypatch):
+    from tests.test_api import RESEARCH
+    cache = Cache()
+    cfg = prop_settings()
+    token_store.save_market_data_tokens(cache, {'access_token': 'md', 'expires_in': 60})
+    with TestClient(create_app(cfg, factory, cache)) as client:
+        r = client.get('/research/ctrader/callback', params={'code': 'abc'})
+        assert r.status_code == 400
+        assert b'state_present=false' in r.content
+        md_auth = client.get('/market/ctrader/authorize', headers={'x-api-key': RESEARCH}).json()
+        # invalid state
+        bad = client.get('/research/ctrader/callback', params={'code': 'abc', 'state': 'not-valid'})
+        assert bad.status_code == 400
+        assert b'state_valid=false' in bad.content
+    assert token_store.load_access_token(cache) == 'md'
+    assert token_store.load_prop_sim_access_token(cache) is None
+
+
+def test_prop_sim_callback_without_cookie_fail_closed(factory, monkeypatch):
+    cache = Cache()
+    cfg = prop_settings()
+    token_store.save_market_data_tokens(cache, {'access_token': 'md', 'expires_in': 60})
+    client, captured, headers = _client(cfg, factory, cache, monkeypatch)
+    with client:
+        r = client.get('/research/ctrader/prop-sim/callback', params={'code': 'abc'})
+        assert r.status_code == 400
+        assert b'Fail closed' in r.content
+    assert token_store.load_access_token(cache) == 'md'
+    assert token_store.load_prop_sim_access_token(cache) is None
+    assert 'redirect_uri' not in captured
+
+
+def test_prop_sim_never_writes_market_data_and_inverse(factory, monkeypatch):
+    cache = Cache()
+    cfg = prop_settings()
+    token_store.save_market_data_tokens(cache, {'access_token': 'md', 'expires_in': 3600})
+    client, captured, headers = _client(cfg, factory, cache, monkeypatch)
+    with client:
+        issued = client.get('/market/ctrader/authorize-prop-sim', headers=headers)
+        assert issued.status_code == 200
+        body = issued.json()
+        assert body['redirect_uri'] == 'https://trader.acshop.shop/research/ctrader/prop-sim/callback'
+        assert 'authorization_url' not in body
+        start = client.get('/research/ctrader/prop-sim/start', params={'tx': body['start_url'].split('tx=')[-1]},
+                           follow_redirects=False)
+        assert start.status_code == 302
+        from urllib.parse import unquote
+        loc = unquote(start.headers['location'])
+        assert 'scope=trading' in loc
+        assert '/research/ctrader/prop-sim/callback' in loc
+        # cTrader dropped state
+        r = client.get('/research/ctrader/prop-sim/callback', params={'code': 'from-broker'})
+        assert r.status_code == 200, r.text
+        assert b'purpose: prop-sim' in r.content
+        assert b'account: ****4978' in r.content
+        assert b'environment: LIVE infrastructure' in r.content
+        assert b'scope: TRADE' in r.content
+        assert b'execution: disabled' in r.content
+        # market-data callback must not write prop-sim
+        leak = client.get('/research/ctrader/callback', params={'code': 'md-code'})
+        assert leak.status_code == 400
+    assert captured['redirect_uri'].endswith('/research/ctrader/prop-sim/callback')
+    assert token_store.load_access_token(cache) == 'md'
+    assert token_store.load_prop_sim_access_token(cache) == 'prop-sim-token'
+    assert token_store.load_token_record(cache, profile='prop-sim')['account_id'] == '17204978'
+
+
+def test_prop_sim_callback_rejects_view_unbound_mismatch(factory, monkeypatch):
+    cache = Cache()
+    cfg = prop_settings()
+    token_store.save_market_data_tokens(cache, {'access_token': 'md', 'expires_in': 60})
+    view = {
+        'permission_scope': ProtoOAClientPermissionScope.SCOPE_VIEW,
+        'accounts': [{'ctidTraderAccountId': 17204978, 'isLive': True}],
+    }
+    client, captured, headers = _client(cfg, factory, cache, monkeypatch, listed=view)
+    with client:
+        issued = client.get('/market/ctrader/authorize-prop-sim', headers=headers).json()
+        client.get('/research/ctrader/prop-sim/start', params={'tx': issued['start_url'].split('tx=')[-1]},
+                   follow_redirects=False)
+        r = client.get('/research/ctrader/prop-sim/callback', params={'code': 'x'})
+        assert r.status_code == 400
+        assert b'PERMISSION_SCOPE_NOT_TRADE' in r.content
+    assert token_store.load_access_token(cache) == 'md'
+    assert token_store.load_prop_sim_access_token(cache) is None
+
+    cache2 = Cache()
+    token_store.save_market_data_tokens(cache2, {'access_token': 'md', 'expires_in': 60})
+    unbound = {'permission_scope': ProtoOAClientPermissionScope.SCOPE_TRADE, 'accounts': []}
+    client, captured, headers = _client(cfg, factory, cache2, monkeypatch, listed=unbound)
+    with client:
+        issued = client.get('/market/ctrader/authorize-prop-sim', headers=headers).json()
+        client.get('/research/ctrader/prop-sim/start', params={'tx': issued['start_url'].split('tx=')[-1]},
+                   follow_redirects=False)
+        r = client.get('/research/ctrader/prop-sim/callback', params={'code': 'x'})
+        assert r.status_code == 400
+        assert b'UNBOUND_ACCOUNT' in r.content
+    assert token_store.load_prop_sim_access_token(cache2) is None
+
+    cache3 = Cache()
+    token_store.save_market_data_tokens(cache3, {'access_token': 'md', 'expires_in': 60})
+    mismatch = {
+        'permission_scope': ProtoOAClientPermissionScope.SCOPE_TRADE,
+        'accounts': [{'ctidTraderAccountId': 999999, 'isLive': True}],
+    }
+    client, captured, headers = _client(cfg, factory, cache3, monkeypatch, listed=mismatch)
+    with client:
+        issued = client.get('/market/ctrader/authorize-prop-sim', headers=headers).json()
+        client.get('/research/ctrader/prop-sim/start', params={'tx': issued['start_url'].split('tx=')[-1]},
+                   follow_redirects=False)
+        r = client.get('/research/ctrader/prop-sim/callback', params={'code': 'x'})
+        assert r.status_code == 400
+    assert token_store.load_prop_sim_access_token(cache3) is None
+    assert token_store.load_access_token(cache3) == 'md'

@@ -81,10 +81,16 @@ def complete_oauth(settings, redis_client, payload, state, *, list_accounts):
     if not token:
         raise CTraderAuthRequired('Token exchange returned no access token')
     listed = list_accounts(token, host=live_host_for_prop_sim(settings, purpose='prop-sim'))
+    accounts = listed.get('accounts') or []
+    if not accounts:
+        raise PropSimError('UNBOUND_ACCOUNT')
+    scope_hint = str(listed.get('permission_scope') or listed.get('scope') or '').lower()
+    if scope_hint in {'accounts', 'view', 'scope_view'}:
+        raise PropSimError('PERMISSION_SCOPE_NOT_TRADE')
     if not permission_is_trade(listed.get('permission_scope')):
         raise PropSimError('PERMISSION_SCOPE_NOT_TRADE')
     validate_listed_accounts(
-        listed.get('accounts'), expected=expected, allowlist=allowed_account_ids(settings))
+        accounts, expected=expected, allowlist=allowed_account_ids(settings))
     token_store.save_prop_sim_tokens(
         redis_client, payload, scope='trading', account_id=expected)
     return {

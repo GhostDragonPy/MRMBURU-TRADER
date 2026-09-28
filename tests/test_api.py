@@ -6,6 +6,7 @@ from core.config import Settings
 from core.models import Account, AuditEvent, KillSwitch, RiskDecisionRecord
 from sqlalchemy import select,func
 from apps.api.main import create_app
+from services.ctrader import tokens as token_store
 
 ADMIN='a'*40
 RESEARCH='r'*40
@@ -69,7 +70,8 @@ def test_health_and_auth(client):
 def test_ctrader_account_info_token_paste(factory):
     cache=Cache()
     with TestClient(create_app(settings(ctrader_client_id='40796_id',ctrader_client_secret='secret',
-                                        ctrader_account_id='17204978'),factory,cache)) as client:
+                                        ctrader_account_id='17204978',
+                                        ctrader_oauth_state_secret='x'*32),factory,cache)) as client:
         rh={'x-api-key':RESEARCH};ah={'x-api-key':ADMIN}
         status=client.get('/market/ctrader/status',headers=rh).json()
         assert status['scope'] is None
@@ -86,8 +88,9 @@ def test_ctrader_account_info_token_paste(factory):
         assert saved.json()['scope']=='accounts'
         assert client.get('/status',headers=rh).json()['ctrader_authorized'] is True
         html=client.get('/research/ctrader/callback',params={'access_token':'another-sandbox-token'})
-        assert html.status_code==200
-        assert b'Orders stay disabled' in html.content
+        assert html.status_code==400
+        assert b'Fail closed' in html.content
+        assert token_store.load_access_token(cache)=='sandbox-token-from-get-token'
 
 
 def test_workflow(client,factory,account,signal,market):

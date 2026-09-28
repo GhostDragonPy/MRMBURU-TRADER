@@ -3,7 +3,11 @@ from __future__ import annotations
 
 from services.ctrader.guards_accounts import FORBIDDEN_EXECUTION_ACCOUNTS, mask_account
 from services.ctrader.types import CTraderAuthRequired, CTraderUnavailable
-from services.demo_orders.guards import DemoGuardError
+try:
+    from services.demo_orders.guards import DemoGuardError
+except ImportError:
+    class DemoGuardError(RuntimeError):
+        pass
 
 PROP_SIM_LIVE_HOST = 'live.ctraderapi.com'
 SCOPE_TRADE = 'TRADE'

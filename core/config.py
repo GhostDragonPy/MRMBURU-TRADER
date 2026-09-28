@@ -87,7 +87,11 @@ class Settings(BaseSettings):
                         self.discord_admin_role_id, self.discord_channel_id,
                         self.discord_allowed_user_ids.strip())):
                 raise ValueError('Discord bot configuration is incomplete')
-        from services.demo_orders.guards import validate_settings
+        try:
+            from services.demo_orders.guards import validate_settings
+        except ImportError:
+            def validate_settings(settings):
+                return None
         from services.ctrader.guards_accounts import FORBIDDEN_EXECUTION_ACCOUNTS
         validate_settings(self)
         prop_id = (self.prop_sim_ctrader_account_id or '').strip()

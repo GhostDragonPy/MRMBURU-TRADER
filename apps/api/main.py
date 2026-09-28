@@ -568,7 +568,10 @@ def create_app(settings=None, factory=None, redis_client=None):
     def resume(body:Control,s=Depends(db)):
         return set_kill_switch(s,active=False,reason=body.reason,actor='admin')
 
-    from apps.api.discord import mount as mount_discord
-    mount_discord(app, settings=settings, factory=factory, redis_client=redis_client, db=db)
+    try:
+        from apps.api.discord import mount as mount_discord
+        mount_discord(app, settings=settings, factory=factory, redis_client=redis_client, db=db)
+    except ImportError:
+        pass
 
     return app

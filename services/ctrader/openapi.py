@@ -193,14 +193,27 @@ class TradingOpenApi(ReadOnlyOpenApi):
     """Same auth as read-only, plus a single market NewOrder path."""
 
     def __init__(self, **kwargs):
-        from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOANewOrderReq
+        from ctrader_open_api.messages.OpenApiMessages_pb2 import (
+            ProtoOAClosePositionReq, ProtoOANewOrderReq,
+        )
         super().__init__(**kwargs)
         self.allowed_writes.add(ProtoOANewOrderReq().payloadType)
+        self.allowed_writes.add(ProtoOAClosePositionReq().payloadType)
+
+    def _await_terminal(self):
+        from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOAExecutionEvent
+        from ctrader_open_api.messages.OpenApiModelMessages_pb2 import ProtoOAExecutionType as XT
+        terminal = {
+            XT.ORDER_FILLED, XT.ORDER_REJECTED, XT.ORDER_CANCELLED,
+            XT.ORDER_EXPIRED, XT.ORDER_PARTIAL_FILL,
+        }
+        while True:
+            event = self.wait_for(ProtoOAExecutionEvent)
+            if event.executionType in terminal:
+                return event
 
     def send_market(self, *, symbol_id: int, side: str, volume: int):
-        from ctrader_open_api.messages.OpenApiMessages_pb2 import (
-            ProtoOAExecutionEvent, ProtoOANewOrderReq,
-        )
+        from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOANewOrderReq
         from ctrader_open_api.messages.OpenApiModelMessages_pb2 import ProtoOAOrderType, ProtoOATradeSide
         if side not in ('buy', 'sell'):
             raise CTraderUnavailable('Invalid trade side')
@@ -216,7 +229,19 @@ class TradingOpenApi(ReadOnlyOpenApi):
         self._deadline = monotonic() + self.timeout
         client_msg_id = f"mrmburu-{next(self._ids)}-{uuid4().hex}"
         self._write(request, client_msg_id)
-        return self.wait_for(ProtoOAExecutionEvent)
+        return self._await_terminal()
+
+    def close_position(self, *, position_id: int, volume: int):
+        from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOAClosePositionReq
+        request = ProtoOAClosePositionReq(
+            ctidTraderAccountId=self.account_id,
+            positionId=int(position_id),
+            volume=int(volume),
+        )
+        self._deadline = monotonic() + self.timeout
+        client_msg_id = f"mrmburu-{next(self._ids)}-{uuid4().hex}"
+        self._write(request, client_msg_id)
+        return self._await_terminal()
 
 
 def _message_class(payload_type: int):

@@ -118,4 +118,4 @@ def open_trading(settings, redis_client=None):
     from services.ctrader.openapi import TradingOpenApi
     if not getattr(settings, 'ctrader_broker_orders', False):
         raise CTraderUnavailable('Broker orders disabled')
-    return TradingOpenApi(timeout=20, **_session(settings, redis_client))
+    return TradingOpenApi(timeout=30, **_session(settings, redis_client))

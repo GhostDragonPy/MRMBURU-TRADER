@@ -309,6 +309,39 @@ def test_diagnostic_canary_roundtrip(factory):
             service.place_diagnostic_canary(session, cfg, gw, now=NOW)
 
 
+def test_diagnostic_canary_failure_commits_block(factory):
+    class Boom(FakeTransport):
+        def submit_market(self, order):
+            self.submits.append(order)
+            raise DemoGuardError('Position not open. PositionId=1')
+
+    cfg = prop_sim_settings()
+    error = None
+    with factory.begin() as session:
+        demo = service.control(session)
+        demo.rollout = 'canary'
+        demo.blocked = False
+        from services.prop_sim_orders.preflight import record_preflight
+        record_preflight(session, cfg, now=NOW, extra_detail={
+            'trading_permission': 'VERIFIED', 'socket': 'sdk-tls'})
+        gw = PropSimCTraderExecutionGateway(Boom())
+        try:
+            service.place_diagnostic_canary(session, cfg, gw, now=NOW)
+        except DemoGuardError as exc:
+            error = exc
+    assert error is not None
+    with factory.begin() as session:
+        intent = session.get(PropSimOrderIntent, service.CANARY_SIGNAL_ID)
+        demo = service.control(session)
+        assert intent is not None
+        assert intent.status == 'failed'
+        assert demo.blocked is True
+        with pytest.raises(DemoGuardError, match='CANARY_ALREADY_USED|blocked|Position not open'):
+            gw = PropSimCTraderExecutionGateway(Boom())
+            demo.rollout = 'canary'
+            service.place_diagnostic_canary(session, cfg, gw, now=NOW)
+
+
 def test_paper_mode_skips_prop_sim(factory):
     transport = FakeTransport()
     with factory.begin() as session:

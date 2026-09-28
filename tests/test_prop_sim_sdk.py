@@ -267,3 +267,85 @@ def test_independent_tokens(factory):
     assert token_store.load_access_token(cache) == 'md-token'
     assert token_store.load_prop_sim_access_token(cache) == 'ps-token'
     assert token_store.load_access_token(cache) != token_store.load_prop_sim_access_token(cache)
+
+
+class _FillSession:
+    def __init__(self, *, live_first=None, live_after=None, amend_error=None):
+        self.account_auth = True
+        self.host = LIVE_HOST
+        self.environment = 'live'
+        self.amends = 0
+        self.live_first = live_first
+        self.live_after = live_after
+        self.amend_error = amend_error
+        self._lookups = 0
+
+    def find_by_client_order_id(self, *args):
+        return None
+
+    def new_order(self, account_id, request):
+        return {
+            'order_id': '11', 'position_id': '22', 'fill_price': '1.10010',
+            'stop_loss': request['stop_loss'], 'take_profit': request['take_profit'],
+            'sl_confirmed': False, 'tp_confirmed': False, 'status': 'ORDER_FILLED',
+            'label': request['label'], 'client_order_id': request['client_order_id'],
+        }
+
+    def position(self, account_id, position_id):
+        self._lookups += 1
+        if self.amends == 0:
+            return self.live_first
+        return self.live_after if self.live_after is not None else self.live_first
+
+    def amend_sl_tp(self, *args, **kwargs):
+        self.amends += 1
+        if self.amend_error:
+            raise DemoGuardError(self.amend_error)
+        return {'sl_confirmed': True, 'stop_loss': '1.09000', 'take_profit': '1.13000'}
+
+
+def _official_transport(session):
+    from services.prop_sim_orders.transport import OfficialPropSimTransport
+    transport = OfficialPropSimTransport(
+        prop_sim_settings(), session=session, token_scope='trading', budget=object())
+    transport._ready = True
+    transport._pause = lambda *_: None
+    transport._instrument = {
+        'symbol_id': 1, 'min_volume': '1000', 'max_volume': '1000000',
+        'step_volume': '1000', 'lot_size': '100000', 'digits': 5, 'pip_position': 4,
+    }
+    return transport
+
+
+def test_protection_reconciles_before_amend():
+    protected = {
+        'label': 'MRMBURU-CANARY', 'volume': 1000, 'stop_loss': '1.09000',
+        'take_profit': '1.13000', 'position_id': '22',
+    }
+    session = _FillSession(live_first=protected)
+    transport = _official_transport(session)
+    result = transport.submit_market({
+        'symbol': 'EURUSD', 'side': 'buy', 'volume': '1000',
+        'stop_loss': '1.09000', 'take_profit': '1.13000',
+        'signal_id': 'sig-a', 'label': 'MRMBURU-CANARY',
+    })
+    assert result['sl_confirmed'] is True
+    assert result['position_id'] == '22'
+    assert session.amends == 0
+
+
+def test_protection_treats_amend_not_open_as_confirmed_after_reconcile():
+    protected = {
+        'label': 'MRMBURU-CANARY', 'volume': 1000, 'stop_loss': '1.09000',
+        'take_profit': '1.13000', 'position_id': '22',
+    }
+    session = _FillSession(live_first=None, live_after=protected,
+                           amend_error='Position not open. PositionId=22')
+    transport = _official_transport(session)
+    result = transport.submit_market({
+        'symbol': 'EURUSD', 'side': 'buy', 'volume': '1000',
+        'stop_loss': '1.09000', 'take_profit': '1.13000',
+        'signal_id': 'sig-b', 'label': 'MRMBURU-CANARY',
+    })
+    assert result['sl_confirmed'] is True
+    assert session.amends == 1

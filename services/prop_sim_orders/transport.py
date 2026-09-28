@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from decimal import Decimal, ROUND_FLOOR
 from threading import Lock
+from time import sleep
 
 from services.ctrader.prop_sim import PROP_SIM_BROKER, PROP_SIM_CTID, PROP_SIM_TRADER_LOGIN
 from services.demo_orders.guards import DEMO_HOST, DemoGuardError
@@ -72,6 +73,7 @@ class OfficialPropSimTransport:
         self._results = {}
         self._instrument = None
         self._sent_new_orders = 0
+        self._pause = sleep
         require_prop_sim_identity(
             account_id=self.account_id, trader_login=self.trader_login, broker=self.broker,
             is_live=True, host=self.host, environment=self.environment, scope=self.scope,
@@ -216,14 +218,39 @@ class OfficialPropSimTransport:
         sl_ok = bool(raw.get('sl_confirmed')) and bool(payload['stop_loss'])
         tp_ok = bool(raw.get('tp_confirmed', True)) and bool(payload['take_profit'])
         if payload['position_id'] and not sl_ok:
-            amended = self.session.amend_sl_tp(
-                self.account_id, payload['position_id'], payload['stop_loss'], payload['take_profit'])
-            sl_ok = bool(amended.get('sl_confirmed'))
-            payload['stop_loss'] = str(amended.get('stop_loss') or payload['stop_loss'])
-            payload['take_profit'] = str(amended.get('take_profit') or payload['take_profit'])
+            sl_ok, payload = self._ensure_protection(payload)
+            tp_ok = sl_ok and bool(payload.get('take_profit'))
         payload['sl_confirmed'] = sl_ok and tp_ok
         payload['tp_confirmed'] = tp_ok
         return payload
+
+    def _ensure_protection(self, payload):
+        """Reconcile before the single allowed Amend. Never send a second NewOrder."""
+        live = None
+        for attempt in range(3):
+            live = self.session.position(self.account_id, payload['position_id'])
+            if live and live.get('stop_loss') and live.get('take_profit'):
+                payload['stop_loss'] = str(live['stop_loss'])
+                payload['take_profit'] = str(live['take_profit'])
+                return True, payload
+            if live:
+                break
+            if attempt < 2:
+                self._pause(0.4)
+        try:
+            amended = self.session.amend_sl_tp(
+                self.account_id, payload['position_id'], payload['stop_loss'], payload['take_profit'])
+        except (DemoGuardError, TimeoutError):
+            live = self.session.position(self.account_id, payload['position_id'])
+            if live and live.get('stop_loss') and live.get('take_profit'):
+                payload['stop_loss'] = str(live['stop_loss'])
+                payload['take_profit'] = str(live['take_profit'])
+                return True, payload
+            raise
+        ok = bool(amended.get('sl_confirmed'))
+        payload['stop_loss'] = str(amended.get('stop_loss') or payload['stop_loss'])
+        payload['take_profit'] = str(amended.get('take_profit') or payload['take_profit'])
+        return ok, payload
 
     def reconcile(self, signal_id):
         self._ensure()

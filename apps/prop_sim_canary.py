@@ -31,6 +31,8 @@ def main(argv=None, *, settings=None, session=None, factory=None, redis_client=N
             redis_client = Redis.from_url(settings.redis_url, socket_connect_timeout=3, socket_timeout=3)
         from services.prop_sim_orders.factory import build_gateway, open_shadow_session
         from services.prop_sim_orders.service import control, place_diagnostic_canary
+        error = None
+        result = None
         with factory.begin() as db:
             demo = control(db)
             if session is None:
@@ -38,7 +40,14 @@ def main(argv=None, *, settings=None, session=None, factory=None, redis_client=N
                 owned = True
             gw = build_gateway(settings, redis_client, db_session=db, token_scope='trading',
                                protobuf_session=session, rollout=demo.rollout)
-            result = place_diagnostic_canary(db, settings, gw)
+            try:
+                result = place_diagnostic_canary(db, settings, gw)
+            except DemoGuardError as exc:
+                error = exc
+        if error is not None:
+            print('FAIL')
+            print(json.dumps(sanitize({'result': 'FAIL', 'reason': str(error)}), indent=2))
+            return 1
         report = sanitize({
             'result': 'PASS',
             'order_id': _mask_id(result.get('order_id')),

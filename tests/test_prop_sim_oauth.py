@@ -13,8 +13,9 @@ def prop_settings(**kw):
     values = dict(
         ctrader_client_id='40796_id', ctrader_client_secret='secret',
         ctrader_account_id='48803059',
-        prop_sim_ctrader_account_id='17204978',
-        prop_sim_allowed_account_ids='17204978',
+        prop_sim_ctrader_account_id='48803059',
+        prop_sim_trader_login='17204978',
+        prop_sim_allowed_account_ids='48803059',
         prop_sim_execution_enabled=False,
         prop_sim_acknowledged_live_environment=False,
         ctrader_oauth_state_secret='x'*32,
@@ -27,78 +28,119 @@ def listed_ok():
     return {
         'permission_scope': ProtoOAClientPermissionScope.SCOPE_TRADE,
         'accounts': [
-            {'ctidTraderAccountId': 17204978, 'isLive': True, 'broker': 'FTMO'},
-            {'ctidTraderAccountId': 48803059, 'isLive': True, 'broker': 'other'},
+            {'ctidTraderAccountId': 48803059, 'traderLogin': 17204978,
+             'isLive': True, 'broker': 'FTMO'},
         ],
         'broker': 'FTMO',
     }
 
 
-def test_callback_does_not_trust_ctrader_account_id():
+def test_login_is_not_treated_as_ctid():
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        prop_settings(prop_sim_ctrader_account_id='17204978',
+                      prop_sim_trader_login='17204978',
+                      prop_sim_allowed_account_ids='17204978')
+    cfg = prop_settings()
+    assert cfg.prop_sim_ctrader_account_id == '48803059'
+    assert cfg.prop_sim_trader_login == '17204978'
+
+
+def test_callback_does_not_trust_trader_login_as_account_id():
     cfg = prop_settings()
     cache = Cache()
-    state = oauth_state.issue(cfg, cache, purpose='prop-sim', expected_account='17204978')
+    state = oauth_state.issue(cfg, cache, purpose='prop-sim', expected_account='48803059')
     consumed = oauth_state.consume(cfg, cache, state)
-    assert consumed['expected_account'] == '17204978'
-    assert consumed['expected_account'] != cfg.ctrader_account_id
+    assert consumed['expected_account'] == '48803059'
+    assert consumed['expected_account'] != cfg.prop_sim_trader_login
     public = complete_oauth(
         cfg, cache,
         {'access_token': 'prop-sim-token', 'refresh_token': 'prop-sim-refresh', 'expires_in': 3600},
         consumed, list_accounts=lambda token, host: listed_ok())
-    assert public['account'] == '****4978'
+    assert public['account'] == '****3059'
+    assert public['trader_login'] == '****4978'
     assert '48803059' not in str(public)
+    assert '17204978' not in str(public)
     market = token_store.load_token_record(cache, profile='market-data')
     prop_sim = token_store.load_token_record(cache, profile='prop-sim')
     assert market is None
-    assert prop_sim['account_id'] == '17204978'
+    assert prop_sim['account_id'] == '48803059'
+    assert prop_sim['trader_login'] == '17204978'
     assert prop_sim['access_token'] == 'prop-sim-token'
     assert prop_sim['execution_usable'] is False
 
 
-def test_prop_sim_token_never_saved_as_forbidden_account():
+def test_prop_sim_token_saved_only_as_disabled_profile():
     cfg = prop_settings()
     cache = Cache()
     token_store.save_market_data_tokens(cache, {'access_token': 'md-token', 'expires_in': 3600})
-    state = {'purpose': 'prop-sim', 'expected_account': '17204978'}
+    state = {'purpose': 'prop-sim', 'expected_account': '48803059'}
     complete_oauth(cfg, cache, {'access_token': 'prop-sim-token', 'expires_in': 3600},
                    state, list_accounts=lambda token, host: listed_ok())
     assert token_store.load_access_token(cache) == 'md-token'
     assert token_store.load_prop_sim_access_token(cache) == 'prop-sim-token'
-    assert token_store.load_token_record(cache, profile='prop-sim')['account_id'] != '48803059'
+    record = token_store.load_token_record(cache, profile='prop-sim')
+    assert record['account_id'] == '48803059'
+    assert record['trader_login'] == '17204978'
+    assert record['execution_usable'] is False
 
 
-def test_expected_account_mismatch_rejected():
+def test_tuple_variations_rejected():
     cfg = prop_settings()
     cache = Cache()
-    only_forbidden = {
+    incomplete = {
         'permission_scope': ProtoOAClientPermissionScope.SCOPE_TRADE,
-        'accounts': [{'ctidTraderAccountId': 48803059, 'isLive': True}],
+        'accounts': [{'ctidTraderAccountId': 48803059, 'isLive': True, 'broker': 'FTMO'}],
     }
-    with pytest.raises(PropSimError, match='TOKEN_ONLY_HAS_FORBIDDEN_ACCOUNT'):
+    with pytest.raises(PropSimError, match='PROP_SIM_TUPLE_MISMATCH'):
         complete_oauth(cfg, cache, {'access_token': 'x', 'expires_in': 60},
-                       {'purpose': 'prop-sim', 'expected_account': '17204978'},
-                       list_accounts=lambda token, host: only_forbidden)
+                       {'purpose': 'prop-sim', 'expected_account': '48803059'},
+                       list_accounts=lambda token, host: incomplete)
     assert token_store.load_prop_sim_access_token(cache) is None
-    missing = {
+    wrong_login = {
         'permission_scope': ProtoOAClientPermissionScope.SCOPE_TRADE,
-        'accounts': [{'ctidTraderAccountId': 999, 'isLive': True}],
+        'accounts': [{'ctidTraderAccountId': 48803059, 'traderLogin': 999,
+                      'isLive': True, 'broker': 'FTMO'}],
     }
-    with pytest.raises(PropSimError):
+    with pytest.raises(PropSimError, match='PROP_SIM_TUPLE_MISMATCH'):
         complete_oauth(cfg, cache, {'access_token': 'x', 'expires_in': 60},
-                       {'purpose': 'prop-sim', 'expected_account': '17204978'},
-                       list_accounts=lambda token, host: missing)
+                       {'purpose': 'prop-sim', 'expected_account': '48803059'},
+                       list_accounts=lambda token, host: wrong_login)
+    wrong_broker = {
+        'permission_scope': ProtoOAClientPermissionScope.SCOPE_TRADE,
+        'accounts': [{'ctidTraderAccountId': 48803059, 'traderLogin': 17204978,
+                      'isLive': True, 'broker': 'OtherBroker'}],
+    }
+    with pytest.raises(PropSimError, match='PROP_SIM_TUPLE_MISMATCH'):
+        complete_oauth(cfg, cache, {'access_token': 'x', 'expires_in': 60},
+                       {'purpose': 'prop-sim', 'expected_account': '48803059'},
+                       list_accounts=lambda token, host: wrong_broker)
+    extra_live = {
+        'permission_scope': ProtoOAClientPermissionScope.SCOPE_TRADE,
+        'accounts': [
+            {'ctidTraderAccountId': 48803059, 'traderLogin': 17204978,
+             'isLive': True, 'broker': 'FTMO'},
+            {'ctidTraderAccountId': 999, 'traderLogin': 1, 'isLive': True, 'broker': 'X'},
+        ],
+    }
+    with pytest.raises(PropSimError, match='OTHER_LIVE_ACCOUNT_BLOCKED'):
+        complete_oauth(cfg, cache, {'access_token': 'x', 'expires_in': 60},
+                       {'purpose': 'prop-sim', 'expected_account': '48803059'},
+                       list_accounts=lambda token, host: extra_live)
+    assert token_store.load_prop_sim_access_token(cache) is None
 
 
 def test_market_data_and_prop_sim_profiles_stay_separated():
     cache = Cache()
     token_store.save_market_data_tokens(cache, {'access_token': 'md', 'expires_in': 60}, scope='accounts')
     token_store.save_prop_sim_tokens(cache, {'access_token': 'ps', 'expires_in': 60},
-                                     scope='trading', account_id='17204978')
+                                     scope='trading', account_id='48803059', trader_login='17204978')
     assert token_store.load_access_token(cache) == 'md'
     assert token_store.load_prop_sim_access_token(cache) == 'ps'
     status = token_store.profiles_status(cache)
     assert status['market_data']['present'] is True
-    assert status['prop_sim']['account_id'] == '****4978'
+    assert status['prop_sim']['account_id'] == '****3059'
+    assert status['prop_sim']['trader_login'] == '****4978'
     assert status['market_data']['execution_usable'] is False
     assert status['prop_sim']['execution_usable'] is False
 
@@ -119,23 +161,27 @@ def test_oauth_html_and_inventory_never_include_tokens(factory):
     from fastapi.testclient import TestClient
     from apps.api.main import create_app, _oauth_html
     html = _oauth_html({
-        'purpose': 'prop-sim', 'account': '****4978',
+        'purpose': 'prop-sim', 'account': '****3059', 'trader_login': '****4978',
         'environment': 'LIVE infrastructure', 'scope': 'TRADE', 'execution': 'disabled',
     })
+    assert '****3059' in html
     assert '****4978' in html
     assert '48803059' not in html
+    assert '17204978' not in html
     assert 'prop-sim' in html
     assert 'TRADE' in html
     assert 'disabled' in html
     cache = Cache()
     token_store.save_prop_sim_tokens(cache, {'access_token': 'secret-token-value', 'expires_in': 60},
-                                     account_id='17204978')
+                                     account_id='48803059', trader_login='17204978')
     listed = listed_ok()
     report = inventory(listed, settings=prop_settings())
     blob = str(report)
     assert 'secret-token-value' not in blob
     assert '48803059' not in blob
-    assert report['accounts'][0]['account'] == '****4978'
+    assert '17204978' not in blob
+    assert report['accounts'][0]['account'] == '****3059'
+    assert report['accounts'][0]['trader_login'] == '****4978'
     cfg = prop_settings(ctrader_client_id='40796_id', ctrader_client_secret='secret')
     token_store.save_market_data_tokens(cache, {'access_token': 'md-keep', 'expires_in': 60})
     with TestClient(create_app(cfg, factory, cache)) as client:
@@ -166,7 +212,7 @@ def test_inventory_cli_zero_orders(capsys):
     code = main(argv=[], settings=prop_settings(), redis_client=cache, listed=listed_ok())
     assert code == 0
     out = capsys.readouterr().out
-    assert '****4978' in out
+    assert '****3059' in out or '****4978' in out
     assert 'isLive' in out
     assert 'TRADE' in out
     assert 'md' not in out
@@ -178,17 +224,18 @@ def test_unbound_and_view_scope_rejected():
     cache = Cache()
     with pytest.raises(PropSimError, match='UNBOUND_ACCOUNT'):
         complete_oauth(cfg, cache, {'access_token': 'x', 'expires_in': 60},
-                       {'purpose': 'prop-sim', 'expected_account': '17204978'},
+                       {'purpose': 'prop-sim', 'expected_account': '48803059'},
                        list_accounts=lambda token, host: {
                            'permission_scope': ProtoOAClientPermissionScope.SCOPE_TRADE,
                            'accounts': []})
     assert token_store.load_prop_sim_access_token(cache) is None
     with pytest.raises(PropSimError, match='PERMISSION_SCOPE_NOT_TRADE'):
         complete_oauth(cfg, cache, {'access_token': 'x', 'expires_in': 60},
-                       {'purpose': 'prop-sim', 'expected_account': '17204978'},
+                       {'purpose': 'prop-sim', 'expected_account': '48803059'},
                        list_accounts=lambda token, host: {
                            'permission_scope': ProtoOAClientPermissionScope.SCOPE_VIEW,
-                           'accounts': [{'ctidTraderAccountId': 17204978, 'isLive': True}]})
+                           'accounts': [{'ctidTraderAccountId': 48803059, 'traderLogin': 17204978,
+                                         'isLive': True, 'broker': 'FTMO'}]})
     assert token_store.load_prop_sim_access_token(cache) is None
 
 
@@ -260,7 +307,8 @@ def test_prop_sim_never_writes_market_data_and_inverse(factory, monkeypatch):
         r = client.get('/research/ctrader/prop-sim/callback', params={'code': 'from-broker'})
         assert r.status_code == 200, r.text
         assert b'purpose: prop-sim' in r.content
-        assert b'account: ****4978' in r.content
+        assert b'account: ****3059' in r.content
+        assert b'trader login: ****4978' in r.content
         assert b'environment: LIVE infrastructure' in r.content
         assert b'scope: TRADE' in r.content
         assert b'execution: disabled' in r.content
@@ -270,7 +318,8 @@ def test_prop_sim_never_writes_market_data_and_inverse(factory, monkeypatch):
     assert captured['redirect_uri'].endswith('/research/ctrader/prop-sim/callback')
     assert token_store.load_access_token(cache) == 'md'
     assert token_store.load_prop_sim_access_token(cache) == 'prop-sim-token'
-    assert token_store.load_token_record(cache, profile='prop-sim')['account_id'] == '17204978'
+    assert token_store.load_token_record(cache, profile='prop-sim')['account_id'] == '48803059'
+    assert token_store.load_token_record(cache, profile='prop-sim')['trader_login'] == '17204978'
 
 
 def test_prop_sim_callback_rejects_view_unbound_mismatch(factory, monkeypatch):
@@ -339,6 +388,7 @@ def test_active_txn_correlates_without_cookie_or_state(factory, monkeypatch):
         r = client.get(hop.headers['location'])
         assert r.status_code == 200, r.text
         assert b'purpose: prop-sim' in r.content
+        assert b'****3059' in r.content
         assert b'****4978' in r.content
         assert b'scope: TRADE' in r.content
     assert token_store.load_access_token(cache) == 'md'

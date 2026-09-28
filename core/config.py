@@ -42,8 +42,9 @@ class Settings(BaseSettings):
     ctrader_prop_sim_redirect_uri: str = 'https://trader.acshop.shop/research/ctrader/prop-sim/callback'
     ctrader_broker_orders: bool = False
     prop_sim_ctrader_account_id: Optional[str] = None
+    prop_sim_trader_login: Optional[str] = None
     prop_sim_execution_enabled: Literal[False] = False
-    prop_sim_allowed_account_ids: str = '17204978'
+    prop_sim_allowed_account_ids: str = '48803059'
     prop_sim_acknowledged_live_environment: bool = False
     ctrader_oauth_state_secret: Optional[SecretStr] = None
     discord_bot_enabled: bool = False
@@ -92,14 +93,19 @@ class Settings(BaseSettings):
         except ImportError:
             def validate_settings(settings):
                 return None
-        from services.ctrader.guards_accounts import FORBIDDEN_EXECUTION_ACCOUNTS
+        from services.ctrader.prop_sim import PROP_SIM_CTID, PROP_SIM_TRADER_LOGIN
         validate_settings(self)
         prop_id = (self.prop_sim_ctrader_account_id or '').strip()
-        if prop_id in FORBIDDEN_EXECUTION_ACCOUNTS:
-            raise ValueError('48803059 cannot be used as PROP_SIM_CTRADER_ACCOUNT_ID')
+        login = (self.prop_sim_trader_login or '').strip()
+        if prop_id and prop_id != PROP_SIM_CTID:
+            raise ValueError('PROP_SIM_CTRADER_ACCOUNT_ID must be the Open API ctid of the FTMO tuple')
+        if login and login != PROP_SIM_TRADER_LOGIN:
+            raise ValueError('PROP_SIM_TRADER_LOGIN must be the visible FTMO trader login')
+        if prop_id == PROP_SIM_CTID and login != PROP_SIM_TRADER_LOGIN:
+            raise ValueError('PROP_SIM_TRADER_LOGIN is required for the FTMO prop-sim tuple')
         allowed = [item.strip() for item in (self.prop_sim_allowed_account_ids or '').split(',') if item.strip()]
-        if any(item in FORBIDDEN_EXECUTION_ACCOUNTS for item in allowed):
-            raise ValueError('48803059 cannot be allowlisted for prop-sim')
+        if any(item != PROP_SIM_CTID for item in allowed):
+            raise ValueError('prop-sim allowlist only permits the exact FTMO ctid')
         if prop_id and allowed and prop_id not in allowed:
             raise ValueError('PROP_SIM_CTRADER_ACCOUNT_ID must be in PROP_SIM_ALLOWED_ACCOUNT_IDS')
         oauth_secret = self.ctrader_oauth_state_secret

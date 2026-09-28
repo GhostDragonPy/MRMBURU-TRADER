@@ -48,9 +48,11 @@ def status(settings, redis_client=None):
                             'execution_usable': False},
             'prop_sim': {'present': profiles['prop_sim']['present'],
                          'execution_usable': False,
-                         'account': profiles['prop_sim']['account_id']},
+                         'account': profiles['prop_sim']['account_id'],
+                         'trader_login': profiles['prop_sim']['trader_login']},
         }
         payload['prop_sim_account_id'] = profiles['prop_sim']['account_id']
+        payload['prop_sim_trader_login'] = profiles['prop_sim']['trader_login']
     if ready and redirect:
         query = urlencode({
             'client_id': settings.ctrader_client_id.get_secret_value(),
@@ -88,8 +90,9 @@ def authorization_url(settings, redis_client, *, purpose='market-data'):
 def authorization_url_prop_sim(settings, redis_client):
     if not configured(settings):
         raise CTraderAuthRequired('cTrader client id/secret are not set')
-    from services.ctrader.prop_sim import expected_account
+    from services.ctrader.prop_sim import expected_account, expected_login
     expected = expected_account(settings)
+    login = expected_login(settings)
     redirect = getattr(settings, 'ctrader_prop_sim_redirect_uri', oauth_tx.PROP_SIM_REDIRECT_URI)
     state = oauth_state.issue(
         settings, redis_client, purpose='prop-sim', expected_account=expected, scope='trading')
@@ -112,6 +115,7 @@ def authorization_url_prop_sim(settings, redis_client):
         'ttl': tx['ttl'],
         'purpose': 'prop-sim',
         'expected_account': expected,
+        'expected_login': login,
     }
 
 

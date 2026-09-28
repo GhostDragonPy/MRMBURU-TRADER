@@ -27,13 +27,16 @@ PROP_SIM_LIST_ACCOUNTS = None
 def _oauth_html(fields):
     purpose = fields.get('purpose', '')
     account = fields.get('account', '****')
+    trader_login = fields.get('trader_login', '')
     environment = fields.get('environment', '')
     scope = fields.get('scope', '')
     execution = fields.get('execution', 'disabled')
+    login_line = f'<p>trader login: {trader_login}</p>' if trader_login else ''
     return (
         '<h1>cTrader connected</h1>'
         f'<p>purpose: {purpose}</p>'
         f'<p>account: {account}</p>'
+        f'{login_line}'
         f'<p>environment: {environment}</p>'
         f'<p>scope: {scope}</p>'
         f'<p>execution: {execution}</p>'
@@ -331,6 +334,7 @@ def create_app(settings=None, factory=None, redis_client=None):
             'scope': 'trading', 'orders': 'disabled',
             'purpose': 'prop-sim', 'execution': 'disabled',
             'expected_account': mask_account(issued['expected_account']),
+            'expected_login': mask_account(issued.get('expected_login') or ''),
         }
 
     @app.get('/research/ctrader/prop-sim/start')

@@ -34,9 +34,11 @@ def save_market_data_tokens(redis_client, payload, default_ttl=3600, scope='acco
         _record(payload, scope=scope, profile='market-data', execution_usable=False)))
 
 
-def save_prop_sim_tokens(redis_client, payload, default_ttl=3600, scope='trading', account_id=''):
+def save_prop_sim_tokens(redis_client, payload, default_ttl=3600, scope='trading', account_id='',
+                         trader_login=''):
     stored = _record(payload, scope=scope, profile='prop-sim', execution_usable=False)
     stored['account_id'] = str(account_id)
+    stored['trader_login'] = str(trader_login)
     redis_client.setex(PROP_SIM_KEY, _ttl(payload, default_ttl), json.dumps(stored))
 
 
@@ -110,6 +112,7 @@ def profiles_status(redis_client):
             'scope': None if not prop_sim else prop_sim.get('scope'),
             'execution_usable': False,
             'account_id': None if not prop_sim else _mask(prop_sim.get('account_id')),
+            'trader_login': None if not prop_sim else _mask(prop_sim.get('trader_login')),
         },
         'execution_quarantined': execution_quarantined(redis_client),
     }

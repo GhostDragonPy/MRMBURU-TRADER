@@ -133,6 +133,43 @@ class AuditEvent(Base):
     payload = Column(JSON, nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow, index=True)
 
+class DemoControl(Base):
+    __tablename__ = 'demo_control'
+    id = Column(Integer, primary_key=True)
+    rollout = Column(String(16), nullable=False, default='disabled')
+    blocked = Column(Boolean, nullable=False, default=False)
+    protection_failed = Column(Boolean, nullable=False, default=False)
+    canary_day = Column(String(16), nullable=True)
+    reason = Column(Text, nullable=False, default='initial')
+    changed_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+    __table_args__ = (
+        CheckConstraint('id = 1', name='demo_control_singleton'),
+        CheckConstraint("rollout IN ('disabled','shadow','canary','enabled')", name='demo_rollout_states'),
+    )
+
+class DemoOrderIntent(Base):
+    __tablename__ = 'demo_order_intents'
+    signal_id = Column(String(64), primary_key=True)
+    status = Column(String(16), nullable=False)
+    request = Column(JSON, nullable=False)
+    response = Column(JSON, nullable=False, default=dict)
+    broker_order_id = Column(String(64), nullable=True)
+    position_id = Column(String(64), nullable=True)
+    fill_price = Column(String(32), nullable=True)
+    stop_loss = Column(String(32), nullable=True)
+    take_profit = Column(String(32), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow, index=True)
+    __table_args__ = (
+        CheckConstraint("status IN ('reserved','shadow','sent','filled','uncertain','failed')",
+                        name='demo_intent_status'),
+    )
+
+class DemoOwnedPosition(Base):
+    __tablename__ = 'demo_owned_positions'
+    position_id = Column(String(64), primary_key=True)
+    signal_id = Column(ForeignKey('demo_order_intents.signal_id'), nullable=False, unique=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+
 class JournalEntry(Base):
     __tablename__ = 'journal_entries'
     id = Column(String(36), primary_key=True, default=uid)

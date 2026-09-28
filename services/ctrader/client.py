@@ -30,7 +30,7 @@ def status(settings, redis_client=None):
         'configured': ready,
         'authorized': bool(access_token(settings, redis_client)),
         'account_id': settings.ctrader_account_id,
-        'scope': 'trading',
+        'scope': token_store.effective_scope(redis_client) if redis_client is not None else None,
         'market_data': 'principal',
         'execution_enabled': False,
         'orders': 'disabled',
@@ -51,11 +51,25 @@ def status(settings, redis_client=None):
 def authorization_url(settings, redis_client):
     if not configured(settings):
         raise CTraderAuthRequired('cTrader client id/secret are not set')
-    state = token_store.begin_login(redis_client)
+    state = token_store.begin_login(redis_client, scope='trading')
     query = urlencode({
         'client_id': settings.ctrader_client_id.get_secret_value(),
         'redirect_uri': settings.ctrader_redirect_uri,
         'scope': 'trading',
+        'product': 'web',
+        'state': state,
+    })
+    return f'{CTRADER_AUTH}?{query}'
+
+
+def authorization_url_accounts(settings, redis_client):
+    if not configured(settings):
+        raise CTraderAuthRequired('cTrader client id/secret are not set')
+    state = token_store.begin_login(redis_client, scope='accounts')
+    query = urlencode({
+        'client_id': settings.ctrader_client_id.get_secret_value(),
+        'redirect_uri': settings.ctrader_redirect_uri,
+        'scope': 'accounts',
         'product': 'web',
         'state': state,
     })

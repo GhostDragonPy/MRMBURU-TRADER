@@ -70,7 +70,8 @@ def test_discord_routes_fail_closed_without_service_key(factory):
     with TestClient(create_app(settings(),factory,Cache())) as client:
         for path in ('status','positions','history','daily-report'):
             assert client.get('/internal/discord/'+path,headers=HEADERS).status_code == 401
-        for path in ('paper-order','paper-close','broker-order','pause','resume'):
+        for path in ('paper-order','paper-close','broker-order','pause','resume',
+                     'demo-emergency-stop','demo-rollout'):
             assert client.post('/internal/discord/'+path,headers=HEADERS,json={}).status_code == 401
 
 def test_risk_above_point_25_and_missing_brackets_rejected(discord_client):

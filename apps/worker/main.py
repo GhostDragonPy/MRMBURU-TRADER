@@ -31,6 +31,13 @@ def paper_loop(settings, factory, cache, stop):
                     result = esses_cycle(session, feed_from_settings(settings, cache),
                         settings.paper_account_id, cache=cache,
                         allow_unknown_news=settings.paper_allow_unknown_news)
+                    if settings.trading_mode == 'demo-orders':
+                        from services.ctrader import tokens as token_store
+                        from services.demo_orders.factory import build_gateway
+                        from services.demo_orders.service import on_paper_cycle
+                        on_paper_cycle(session, settings, result, now=datetime.now(timezone.utc),
+                            gateway=build_gateway(settings, cache),
+                            token_scope=token_store.effective_scope(cache) or 'accounts')
                 else:
                     result = cycle(session, feed_from_settings(settings, cache),
                         settings.paper_account_id,

@@ -72,7 +72,7 @@ def test_ctrader_account_info_token_paste(factory):
                                         ctrader_account_id='17204978'),factory,cache)) as client:
         rh={'x-api-key':RESEARCH};ah={'x-api-key':ADMIN}
         status=client.get('/market/ctrader/status',headers=rh).json()
-        assert status['scope']=='trading'
+        assert status['scope'] is None
         assert status['orders']=='disabled'
         assert 'scope=trading' in status['authorization_url']
         auth=client.get('/market/ctrader/authorize',headers=rh).json()
@@ -83,6 +83,7 @@ def test_ctrader_account_info_token_paste(factory):
         assert saved.status_code==200
         assert saved.json()['authorized'] is True
         assert saved.json()['orders']=='disabled'
+        assert saved.json()['scope']=='accounts'
         assert client.get('/status',headers=rh).json()['ctrader_authorized'] is True
         html=client.get('/research/ctrader/callback',params={'access_token':'another-sandbox-token'})
         assert html.status_code==200

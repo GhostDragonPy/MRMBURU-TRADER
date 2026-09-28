@@ -7,8 +7,12 @@ from sqlalchemy.engine import URL
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file='.env', extra='ignore')
     app_env: str = 'development'
-    trading_mode: Literal['paper'] = 'paper'
+    trading_mode: Literal['paper', 'demo-orders'] = 'paper'
     execution_enabled: Literal[False] = False
+    allow_live_trading: Literal[False] = False
+    demo_execution_enabled: bool = False
+    demo_ctrader_account_id: Optional[str] = None
+    esses_broker_execution: bool = False
     paper_scheduler_enabled: bool = False
     paper_account_id: Optional[str] = None
     # Optional explicit research-only waiver, never represents verified news.
@@ -44,7 +48,7 @@ class Settings(BaseSettings):
     discord_api_url: str = 'http://api:8000'
     discord_rate_limit_per_minute: int = Field(default=10, ge=1, le=60)
 
-    @field_validator('execution_enabled', mode='before')
+    @field_validator('execution_enabled', 'allow_live_trading', mode='before')
     @classmethod
     def coerce_execution_enabled(cls, value):
         # Env vars arrive as strings; Literal[False] rejects "false" without coercion.
@@ -75,6 +79,8 @@ class Settings(BaseSettings):
                         self.discord_admin_role_id, self.discord_channel_id,
                         self.discord_allowed_user_ids.strip())):
                 raise ValueError('Discord bot configuration is incomplete')
+        from services.demo_orders.guards import validate_settings
+        validate_settings(self)
         return self
 
     @property

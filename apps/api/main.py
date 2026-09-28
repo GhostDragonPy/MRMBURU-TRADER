@@ -259,6 +259,23 @@ def create_app(settings=None, factory=None, redis_client=None):
     def ctrader_status():
         return ctrader.status(settings, redis_client)
 
+    @app.get('/market/ctrader/authorize-accounts', dependencies=[Depends(research)])
+    def ctrader_authorize_accounts():
+        try:
+            url = ctrader.authorization_url_accounts(settings, redis_client)
+        except CTraderAuthRequired as exc:
+            raise HTTPException(401, str(exc)) from None
+        return {'authorization_url': url, 'scope': 'accounts', 'orders': 'disabled'}
+
+    @app.get('/market/ctrader/authorize-trading', dependencies=[Depends(research)])
+    def ctrader_authorize_trading():
+        try:
+            url = ctrader.authorization_url(settings, redis_client)
+        except CTraderAuthRequired as exc:
+            raise HTTPException(401, str(exc)) from None
+        return {'authorization_url': url, 'scope': 'trading', 'orders': 'disabled',
+                'note': 'Trading scope is stored separately; live accounts remain forbidden.'}
+
     @app.get('/market/ctrader/authorize', dependencies=[Depends(research)])
     def ctrader_authorize():
         try:
@@ -275,8 +292,9 @@ def create_app(settings=None, factory=None, redis_client=None):
             'access_token': body.access_token,
             'refresh_token': body.refresh_token,
             'expires_in': body.expires_in,
-        })
-        return {'authorized': True, 'account_id': settings.ctrader_account_id, 'orders': 'disabled', 'scope': 'trading'}
+        }, scope='accounts')
+        return {'authorized': True, 'account_id': settings.ctrader_account_id, 'orders': 'disabled',
+                'scope': 'accounts'}
 
     @app.get('/research/ctrader/callback', response_class=HTMLResponse)
     def ctrader_callback(code: str = '', state: str = '', error: str = '', access_token: str = ''):
@@ -284,9 +302,10 @@ def create_app(settings=None, factory=None, redis_client=None):
         if error:
             return HTMLResponse(f'<h1>cTrader OAuth error</h1><p>{error}</p>', status_code=400)
         if access_token:
-            token_store.save_tokens(redis_client, {'access_token': access_token, 'expires_in': 86400})
-            return HTMLResponse('<h1>cTrader connected</h1><p>Production token saved. Orders stay disabled.</p>')
-        if state and not token_store.consume_state(redis_client, state):
+            token_store.save_tokens(redis_client, {'access_token': access_token, 'expires_in': 86400}, scope='accounts')
+            return HTMLResponse('<h1>cTrader connected</h1><p>Account-info token saved. Orders stay disabled.</p>')
+        granted = token_store.consume_state(redis_client, state) if state else None
+        if state and not granted:
             return HTMLResponse('<h1>Invalid OAuth state</h1><p>Retry /market/ctrader/authorize</p>', status_code=400)
         if not code:
             return HTMLResponse('<h1>Missing code</h1><p>Click Get token with Account info, then paste the token if shown.</p>', status_code=400)
@@ -294,7 +313,7 @@ def create_app(settings=None, factory=None, redis_client=None):
             payload = ctrader.exchange_code(settings, code)
             if payload.get('errorCode') or payload.get('error'):
                 return HTMLResponse(f'<h1>Token exchange failed</h1><p>{payload.get("description") or payload.get("error")}</p>', status_code=400)
-            token_store.save_tokens(redis_client, payload)
+            token_store.save_tokens(redis_client, payload, scope=granted or 'accounts')
         except (CTraderAuthRequired, CTraderUnavailable) as exc:
             return HTMLResponse(f'<h1>cTrader unavailable</h1><p>{exc}</p>', status_code=503)
         account = settings.ctrader_account_id or 'unknown'

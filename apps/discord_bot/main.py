@@ -17,6 +17,8 @@ INTERNAL_PATHS = frozenset({
     '/internal/discord/history', '/internal/discord/daily-report',
     '/internal/discord/paper-order', '/internal/discord/paper-close',
     '/internal/discord/broker-order',
+    '/internal/discord/demo-status', '/internal/discord/demo-emergency-stop',
+    '/internal/discord/demo-rollout',
     '/internal/discord/pause', '/internal/discord/resume',
 })
 
@@ -292,6 +294,16 @@ async def paper_close(interaction, position_id:str, reason:str):
         return await call('/internal/discord/paper-close',confirm_interaction,'POST',payload)
     await interaction.response.send_message(f'Cerrar {position_id}: {reason}\n¿Confirmar?',
         view=Confirm(interaction.user.id,execute),ephemeral=True)
+
+@client.tree.command(name='demo_status',description='Estado de demo-orders (sin secretos)')
+async def demo_status(interaction):
+    if not await guard(interaction): return
+    await interaction.response.defer(ephemeral=True)
+    await interaction.followup.send(render(await call('/internal/discord/demo-status',interaction)),ephemeral=True)
+
+@client.tree.command(name='demo_emergency_stop',description='Detener entradas demo-orders; no cierra posiciones')
+async def demo_emergency_stop(interaction, reason:str):
+    await control_prompt(interaction,'demo-emergency-stop',reason)
 
 def main():
     global lock

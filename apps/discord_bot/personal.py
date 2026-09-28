@@ -17,7 +17,7 @@ URLISH = re.compile(r'(?i)(https?://|file:|ftp:|\\\\|localhost|\d{1,3}(?:\.\d{1,
 COMMAND_NAMES = frozenset({
     'ayuda', 'identidad', 'clima', 'tokens', 'recordatorio', 'buscar',
     'status', 'positions', 'history', 'daily_report', 'pause', 'resume',
-    'paper_order', 'paper_close', 'broker_order',
+    'paper_order', 'paper_close', 'broker_order', 'demo_status', 'demo_emergency_stop',
 })
 
 

@@ -142,6 +142,47 @@ def mount(app, *, settings, factory, redis_client, db):
     def pause(body:DiscordControl, user=Depends(authorized), session=Depends(db)):
         return control(body, user, session, True)
 
+    @app.get('/internal/discord/demo-status')
+    def demo_status(user=Depends(authorized), session=Depends(db)):
+        from services.ctrader import tokens as token_store
+        from services.demo_orders.service import status_payload
+        audit_read(session, user, 'demo_status')
+        payload = status_payload(session, settings, token_store.effective_scope(redis_client))
+        payload['allow_live_trading'] = False
+        return payload
+
+    @app.post('/internal/discord/demo-emergency-stop')
+    def demo_emergency_stop(body:DiscordControl, user=Depends(authorized), session=Depends(db)):
+        from services.demo_orders.service import emergency_stop
+        def execute():
+            return emergency_stop(session, body.reason)
+        return discord_sandbox.idempotent(session, interaction_id=body.interaction_id,
+            user_id=user, action='demo-emergency-stop',
+            payload={'reason':body.reason}, operation=execute)
+
+    class DiscordRollout(DiscordControl):
+        pass
+
+    @app.post('/internal/discord/demo-rollout')
+    def demo_rollout(body:dict, user=Depends(authorized), session=Depends(db)):
+        from services.demo_orders.guards import DemoGuardError
+        from services.demo_orders.service import advance_rollout
+        target = body.get('target')
+        confirmed = body.get('confirmed') is True
+        interaction_id = body.get('interaction_id','')
+        reason = body.get('reason','rollout')
+        if target == 'live' or body.get('allow_live_trading'):
+            raise HTTPException(403, 'LIVE trading cannot be enabled')
+        def execute():
+            try:
+                return advance_rollout(session, target, confirmed=confirmed)
+            except DemoGuardError as exc:
+                raise HTTPException(409, str(exc)) from None
+        return discord_sandbox.idempotent(session, interaction_id=interaction_id,
+            user_id=user, action='demo-rollout',
+            payload={'target':target,'reason':reason}, operation=execute)
+
     @app.post('/internal/discord/resume')
     def resume(body:DiscordControl, user=Depends(authorized), session=Depends(db)):
         return control(body, user, session, False)
+

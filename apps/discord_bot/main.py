@@ -1,4 +1,4 @@
-"""Discord slash-command client. It receives no cTrader credentials."""
+"""Personal Discord bot plus MRMBURU paper slash commands. No cTrader credentials."""
 import asyncio, json, logging, os
 from dataclasses import dataclass
 from urllib.error import HTTPError
@@ -6,6 +6,7 @@ from urllib.request import Request, urlopen
 import discord
 from discord import app_commands
 from redis import Redis
+from apps.discord_bot import gateway_lock, identity, personal
 from apps.discord_bot.security import AuthorizationError, allowed, rate_limit
 
 logging.basicConfig(level=logging.INFO)
@@ -81,11 +82,30 @@ class Client(discord.Client):
         self.tree.copy_global_to(guild=guild); await self.tree.sync(guild=guild)
         self._health_task = asyncio.create_task(self.health_loop())
 
+    async def on_ready(self):
+        await self.change_presence(activity=discord.Activity(
+            type=discord.ActivityType.watching, name=identity.ACTIVITY))
+
     async def health_loop(self):
         while not self.is_closed():
             if self.is_ready():
                 await asyncio.to_thread(cache.setex, 'discord:bot:healthy', 45, '1')
+                await asyncio.to_thread(gateway_lock.refresh, cache, settings.token)
+                await self.flush_reminders()
             await asyncio.sleep(15)
+
+    async def flush_reminders(self):
+        due = await asyncio.to_thread(personal.due_reminders, cache)
+        for item in due:
+            channel = self.get_channel(int(item['channel_id']))
+            if channel is None:
+                continue
+            mention = f"<@{item['user_id']}>"
+            await channel.send(f"{identity.CAT} Recordatorio {mention}: {item['text']}")
+
+    async def close(self):
+        await asyncio.to_thread(gateway_lock.release, cache, settings.token)
+        await super().close()
 
 client=Client()
 
@@ -98,11 +118,66 @@ async def guard(interaction):
 
 def render(data): return json.dumps(data,indent=2)[:1900]
 
+@client.tree.command(name='ayuda',description='Identidad GhostDragon y comandos disponibles')
+async def ayuda(interaction):
+    if not await guard(interaction): return
+    personal.record_usage(cache, interaction.user.id, 'ayuda')
+    await interaction.response.send_message(identity.help_text(), ephemeral=True)
+
+@client.tree.command(name='identidad',description='Quién es este bot y qué no puede hacer')
+async def identidad(interaction):
+    if not await guard(interaction): return
+    personal.record_usage(cache, interaction.user.id, 'identidad')
+    await interaction.response.send_message(render(identity.identity_payload()), ephemeral=True)
+
+@client.tree.command(name='clima',description='Consulta el clima (wttr.in, sin API key)')
+async def clima(interaction, ciudad:str):
+    if not await guard(interaction): return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        text = await asyncio.to_thread(personal.weather, ciudad)
+    except (ValueError, RuntimeError) as exc:
+        await interaction.followup.send(str(exc), ephemeral=True); return
+    personal.record_usage(cache, interaction.user.id, 'clima')
+    await interaction.followup.send(text, ephemeral=True)
+
+@client.tree.command(name='tokens',description='Contador local de comandos personales')
+async def tokens(interaction):
+    if not await guard(interaction): return
+    personal.record_usage(cache, interaction.user.id, 'tokens')
+    await interaction.response.send_message(render(personal.usage_report(cache, interaction.user.id)), ephemeral=True)
+
+@client.tree.command(name='recordatorio',description='Aviso paper en este canal (1–1440 minutos)')
+async def recordatorio(interaction, minutos:int, texto:str):
+    if not await guard(interaction): return
+    try:
+        saved = personal.schedule_reminder(
+            cache, user_id=interaction.user.id, channel_id=interaction.channel_id,
+            minutes=minutos, text=texto)
+    except ValueError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True); return
+    personal.record_usage(cache, interaction.user.id, 'recordatorio')
+    await interaction.response.send_message(
+        f"{identity.CAT} Listo. Te aviso a las {saved['due']}: {saved['text']}", ephemeral=True)
+
+@client.tree.command(name='buscar',description='Búsqueda breve (DuckDuckGo instant answer)')
+async def buscar(interaction, consulta:str):
+    if not await guard(interaction): return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        text = await asyncio.to_thread(personal.search, consulta)
+    except (ValueError, RuntimeError) as exc:
+        await interaction.followup.send(str(exc), ephemeral=True); return
+    personal.record_usage(cache, interaction.user.id, 'buscar')
+    await interaction.followup.send(text, ephemeral=True)
+
 @client.tree.command(name='status',description='Estado del bot paper')
 async def status(interaction):
     if not await guard(interaction): return
     await interaction.response.defer(ephemeral=True)
-    await interaction.followup.send(render(await call('/internal/discord/status',interaction)),ephemeral=True)
+    payload = await call('/internal/discord/status',interaction)
+    payload['identity'] = identity.DISPLAY_NAME
+    await interaction.followup.send(identity.banner()+'\n'+render(payload),ephemeral=True)
 
 @client.tree.command(name='positions',description='Posiciones manuales paper abiertas')
 async def positions(interaction):
@@ -166,6 +241,7 @@ def main():
     if not settings.enabled: raise SystemExit('Discord bot is disabled')
     if not all((settings.token,settings.api_key,settings.guild_id,settings.admin_role_id,settings.allowed_user_ids)):
         raise SystemExit('Discord bot configuration is incomplete')
+    gateway_lock.acquire(cache, settings.token)
     client.run(settings.token, log_handler=None)
 
 if __name__ == '__main__': main()

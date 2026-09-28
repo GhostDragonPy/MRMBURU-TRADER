@@ -1,1 +1,1 @@
-"""Discord administration client."""
+"""Personal GhostDragon Discord client with MRMBURU paper administration."""

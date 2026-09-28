@@ -5,6 +5,7 @@ from pydantic import ValidationError
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 from apps.api.main import create_app
+from apps.discord_bot import gateway_lock, identity, personal
 from apps.discord_bot.security import AuthorizationError, allowed, rate_limit
 from apps.discord_bot import healthcheck
 from core.models import (Account, AuditEvent, AutomaticPaperControl, DiscordInteraction,
@@ -154,3 +155,85 @@ def test_bot_healthcheck_requires_fresh_gateway_heartbeat(monkeypatch):
     assert exc.value.code == 1
     cache.healthy = True
     healthcheck.main()
+
+
+class Memory:
+    def __init__(self):
+        self.kv = {}
+        self.z = {}
+    def set(self, key, value, nx=False, xx=False, ex=None):
+        if nx and key in self.kv:
+            return False
+        if xx and key not in self.kv:
+            return False
+        self.kv[key] = value
+        return True
+    def get(self, key):
+        return self.kv.get(key)
+    def delete(self, key):
+        return 1 if self.kv.pop(key, None) is not None else 0
+    def incr(self, key):
+        self.kv[key] = int(self.kv.get(key) or 0) + 1
+        return self.kv[key]
+    def zadd(self, key, mapping):
+        self.z.setdefault(key, {}).update(mapping)
+    def zrangebyscore(self, key, minimum, maximum):
+        return [member for member, score in self.z.get(key, {}).items() if minimum <= score <= maximum]
+    def zrem(self, key, member):
+        self.z.get(key, {}).pop(member, None)
+
+
+def test_identity_keeps_paper_and_existing_admin_commands():
+    payload = identity.identity_payload()
+    assert payload['name'] == 'GhostDragon'
+    assert payload['execution_enabled'] is False
+    assert payload['mode'] == 'paper'
+    text = identity.help_text()
+    for name in identity.ADMIN_COMMANDS + identity.PERSONAL_COMMANDS:
+        assert '/'+name in text
+    assert 'discord-sandbox' in text
+    assert 'cTrader' in text
+
+
+def test_gateway_lock_rejects_a_second_process_with_the_same_token(monkeypatch):
+    cache = Memory()
+    monkeypatch.setattr(gateway_lock.os, 'getpid', lambda: 11)
+    assert gateway_lock.acquire(cache, 'shared-token') is True
+    monkeypatch.setattr(gateway_lock.os, 'getpid', lambda: 12)
+    with pytest.raises(RuntimeError, match='Another process'):
+        gateway_lock.acquire(cache, 'shared-token')
+
+
+def test_personal_reminders_and_usage_stay_local():
+    cache = Memory()
+    saved = personal.schedule_reminder(cache, user_id=42, channel_id=99, minutes=1, text='revisar paper')
+    assert saved['paper_only'] is True
+    personal.record_usage(cache, 42, 'ayuda')
+    personal.record_usage(cache, 42, 'tokens')
+    report = personal.usage_report(cache, 42)
+    assert report['command_count'] == 2
+    assert report['execution_enabled'] is False
+    from datetime import datetime, timezone, timedelta
+    due = personal.due_reminders(cache, now=datetime.now(timezone.utc)+timedelta(minutes=2))
+    assert due[0]['text'] == 'revisar paper'
+    assert personal.due_reminders(cache) == []
+
+
+def test_weather_and_search_use_public_lookups(monkeypatch):
+    class Response:
+        def __init__(self, body): self.body = body.encode()
+        def read(self): return self.body
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+    def fake_open(request, timeout=8):
+        url = request.get_full_url() if hasattr(request, 'get_full_url') else str(request)
+        if 'wttr.in' in url:
+            return Response('Asuncion: ⛅ +24°C')
+        return Response('{"Heading":"EURUSD","AbstractText":"Par de divisas.","RelatedTopics":[]}')
+    monkeypatch.setattr(personal, 'urlopen', fake_open)
+    assert 'Asuncion' in personal.weather('Asuncion')
+    assert 'Par de divisas' in personal.search('EURUSD')
+    with pytest.raises(ValueError):
+        personal.weather(' ')
+    with pytest.raises(ValueError):
+        personal.schedule_reminder(Memory(), user_id=1, channel_id=1, minutes=0, text='x')

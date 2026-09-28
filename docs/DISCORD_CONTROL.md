@@ -1,9 +1,21 @@
 # Discord control (paper only)
 
-This service exposes slash commands for administrative observation and isolated manual
-paper trading. It cannot place, change, or close cTrader orders. The container receives
-only its Discord token, an internal API key, IDs used for authorization, and Redis/API
-addresses. It does not receive the cTrader environment variables.
+The Discord process is the personal **GhostDragon** assistant plus MRMBURU
+administrative slash commands. It cannot place, change, or close cTrader orders.
+`EXECUTION_ENABLED` remains false. Personal commands (`/ayuda`, `/identidad`,
+`/clima`, `/tokens`, `/recordatorio`, `/buscar`) keep the existing Spanish
+identity. Administrative commands (`/status`, `/positions`, `/history`,
+`/daily_report`, `/pause`, `/resume`, `/paper_order`, `/paper_close`) call
+`/internal/discord/*`.
+
+The container receives only its Discord token, an internal API key, IDs used for
+authorization, and Redis/API addresses. It does not receive the cTrader
+environment variables.
+
+Never run two gateways with the same `DISCORD_BOT_TOKEN`. Stop nanobot (or any
+other Discord client using that token) before enabling this service. Startup
+takes a Redis lock (`discord:gateway:lock`) and exits if another process already
+holds the same token.
 
 ## Discord application setup
 

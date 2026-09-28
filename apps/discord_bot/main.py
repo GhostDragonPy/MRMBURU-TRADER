@@ -1,0 +1,171 @@
+"""Discord slash-command client. It receives no cTrader credentials."""
+import asyncio, json, logging, os
+from dataclasses import dataclass
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
+import discord
+from discord import app_commands
+from redis import Redis
+from apps.discord_bot.security import AuthorizationError, allowed, rate_limit
+
+logging.basicConfig(level=logging.INFO)
+@dataclass(frozen=True)
+class BotSettings:
+    enabled: bool
+    token: str
+    api_key: str
+    guild_id: int
+    admin_role_id: int
+    allowed_user_ids: str
+    api_url: str
+    redis_url: str
+    rate_limit: int
+
+def load_settings():
+    return BotSettings(os.getenv('DISCORD_BOT_ENABLED','false').lower() == 'true',
+        os.getenv('DISCORD_BOT_TOKEN',''), os.getenv('DISCORD_API_KEY',''),
+        int(os.getenv('DISCORD_GUILD_ID','0')), int(os.getenv('DISCORD_ADMIN_ROLE_ID','0')),
+        os.getenv('DISCORD_ALLOWED_USER_IDS',''), os.getenv('DISCORD_API_URL','http://api:8000'),
+        os.getenv('REDIS_URL','redis://redis:6379/0'),
+        int(os.getenv('DISCORD_RATE_LIMIT_PER_MINUTE','10')))
+
+settings = load_settings()
+cache = Redis.from_url(settings.redis_url, socket_connect_timeout=3, socket_timeout=3)
+
+def api(path, user_id, method='GET', payload=None):
+    data = json.dumps(payload).encode() if payload is not None else None
+    request = Request(settings.api_url.rstrip('/')+path, data=data, method=method,
+        headers={'content-type':'application/json',
+                 'x-discord-api-key':settings.api_key,
+                 'x-discord-user-id':str(user_id)})
+    try:
+        with urlopen(request, timeout=10) as response: return json.loads(response.read())
+    except HTTPError as exc:
+        raise RuntimeError(f'Internal API rejected request ({exc.code})') from None
+
+async def call(path, interaction, method='GET', payload=None):
+    rate_limit(cache, user_id=interaction.user.id, limit=settings.rate_limit)
+    return await asyncio.to_thread(api, path, interaction.user.id, method, payload)
+
+def authorize(interaction):
+    roles = [role.id for role in getattr(interaction.user, 'roles', ())]
+    return allowed(guild_id=interaction.guild_id, user_id=interaction.user.id, role_ids=roles,
+        expected_guild_id=settings.guild_id, admin_role_id=settings.admin_role_id,
+        allowed_user_ids=settings.allowed_user_ids)
+
+class Confirm(discord.ui.View):
+    def __init__(self, owner_id, action):
+        super().__init__(timeout=60); self.owner_id=owner_id; self.action=action
+    @discord.ui.button(label='Confirmar', style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction, button):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message('Confirmación no autorizada.', ephemeral=True); return
+        for item in self.children: item.disabled=True
+        await interaction.response.defer(ephemeral=True)
+        try: result=await self.action(interaction)
+        except Exception as exc:
+            await interaction.edit_original_response(content=f'Rechazado: {exc}',view=self); return
+        await interaction.edit_original_response(content=json.dumps(result,indent=2)[:1900],view=self)
+    @discord.ui.button(label='Cancelar', style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction, button):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message('Cancelación no autorizada.',ephemeral=True); return
+        for item in self.children: item.disabled=True
+        await interaction.response.edit_message(content='Cancelado.',view=self)
+
+class Client(discord.Client):
+    def __init__(self):
+        super().__init__(intents=discord.Intents(guilds=True)); self.tree=app_commands.CommandTree(self)
+    async def setup_hook(self):
+        guild=discord.Object(id=settings.guild_id)
+        self.tree.copy_global_to(guild=guild); await self.tree.sync(guild=guild)
+        self._health_task = asyncio.create_task(self.health_loop())
+
+    async def health_loop(self):
+        while not self.is_closed():
+            if self.is_ready():
+                await asyncio.to_thread(cache.setex, 'discord:bot:healthy', 45, '1')
+            await asyncio.sleep(15)
+
+client=Client()
+
+async def guard(interaction):
+    try: authorize(interaction); return True
+    except AuthorizationError as exc:
+        if interaction.response.is_done(): await interaction.followup.send(str(exc),ephemeral=True)
+        else: await interaction.response.send_message(str(exc),ephemeral=True)
+        return False
+
+def render(data): return json.dumps(data,indent=2)[:1900]
+
+@client.tree.command(name='status',description='Estado del bot paper')
+async def status(interaction):
+    if not await guard(interaction): return
+    await interaction.response.defer(ephemeral=True)
+    await interaction.followup.send(render(await call('/internal/discord/status',interaction)),ephemeral=True)
+
+@client.tree.command(name='positions',description='Posiciones manuales paper abiertas')
+async def positions(interaction):
+    if not await guard(interaction): return
+    await interaction.response.defer(ephemeral=True)
+    await interaction.followup.send(render(await call('/internal/discord/positions',interaction)),ephemeral=True)
+
+@client.tree.command(name='history',description='Operaciones manuales recientes')
+async def history(interaction):
+    if not await guard(interaction): return
+    await interaction.response.defer(ephemeral=True)
+    await interaction.followup.send(render(await call('/internal/discord/history',interaction)),ephemeral=True)
+
+@client.tree.command(name='daily_report',description='Informe de discord-sandbox')
+async def daily_report(interaction):
+    if not await guard(interaction): return
+    await interaction.response.defer(ephemeral=True)
+    await interaction.followup.send(render(await call('/internal/discord/daily-report',interaction)),ephemeral=True)
+
+async def control_prompt(interaction, action, reason):
+    if not await guard(interaction): return
+    payload={'interaction_id':str(interaction.id),'reason':reason}
+    async def execute(confirm_interaction):
+        return await call('/internal/discord/'+action,confirm_interaction,'POST',payload)
+    await interaction.response.send_message(f'Confirmar /{action}: {reason}',
+        view=Confirm(interaction.user.id,execute),ephemeral=True)
+
+@client.tree.command(name='pause',description='Pausar nuevas entradas automáticas paper')
+async def pause(interaction, reason:str): await control_prompt(interaction,'pause',reason)
+
+@client.tree.command(name='resume',description='Reanudar entradas automáticas paper')
+async def resume(interaction, reason:str): await control_prompt(interaction,'resume',reason)
+
+@client.tree.command(name='paper_order',description='Crear una operación manual simulada EURUSD')
+@app_commands.describe(side='buy o sell',stop_loss='Stop loss',take_profit='Take profit',
+                       risk_percent='Porcentaje (máximo 0.25)',reason='Motivo obligatorio')
+@app_commands.choices(side=[app_commands.Choice(name='Buy',value='buy'),app_commands.Choice(name='Sell',value='sell')])
+async def paper_order(interaction, side:app_commands.Choice[str], stop_loss:float,
+                      take_profit:float, risk_percent:float, reason:str):
+    if not await guard(interaction): return
+    if risk_percent <= 0 or risk_percent > .25:
+        await interaction.response.send_message('El riesgo debe estar entre 0 y 0.25%.',ephemeral=True); return
+    payload={'interaction_id':str(interaction.id),'side':side.value,'stop_loss':str(stop_loss),
+        'take_profit':str(take_profit),'risk_percent':str(risk_percent),'reason':reason}
+    async def execute(confirm_interaction):
+        return await call('/internal/discord/paper-order',confirm_interaction,'POST',payload)
+    summary=f'EURUSD {side.value.upper()} market | SL {stop_loss} | TP {take_profit} | riesgo {risk_percent}% | {reason}'
+    await interaction.response.send_message(summary+'\n¿Confirmar simulación?',
+        view=Confirm(interaction.user.id,execute),ephemeral=True)
+
+@client.tree.command(name='paper_close',description='Cerrar una posición manual simulada')
+async def paper_close(interaction, position_id:str, reason:str):
+    if not await guard(interaction): return
+    payload={'interaction_id':str(interaction.id),'position_id':position_id,'reason':reason}
+    async def execute(confirm_interaction):
+        return await call('/internal/discord/paper-close',confirm_interaction,'POST',payload)
+    await interaction.response.send_message(f'Cerrar {position_id}: {reason}\n¿Confirmar?',
+        view=Confirm(interaction.user.id,execute),ephemeral=True)
+
+def main():
+    if not settings.enabled: raise SystemExit('Discord bot is disabled')
+    if not all((settings.token,settings.api_key,settings.guild_id,settings.admin_role_id,settings.allowed_user_ids)):
+        raise SystemExit('Discord bot configuration is incomplete')
+    client.run(settings.token, log_handler=None)
+
+if __name__ == '__main__': main()

@@ -19,6 +19,45 @@ class PaperEvent(Base):
     payload = Column(JSON, nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow, index=True)
 
+class DiscordInteraction(Base):
+    __tablename__ = 'discord_interactions'
+    interaction_id = Column(String(32), primary_key=True)
+    user_id = Column(String(32), nullable=False)
+    action = Column(String(64), nullable=False)
+    request_hash = Column(String(64), nullable=False)
+    response = Column(JSON, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow, index=True)
+
+class DiscordPaperPosition(Base):
+    __tablename__ = 'discord_paper_positions'
+    id = Column(String(36), primary_key=True, default=uid)
+    account_id = Column(ForeignKey('accounts.id'), nullable=False, index=True)
+    signal_id = Column(ForeignKey('signals.id'), nullable=False, unique=True)
+    side = Column(String(4), nullable=False)
+    symbol = Column(String(16), nullable=False)
+    units = Column(Numeric(24,8), nullable=False)
+    entry = Column(Numeric(24,8), nullable=False)
+    stop_loss = Column(Numeric(24,8), nullable=False)
+    take_profit = Column(Numeric(24,8), nullable=False)
+    risk_amount = Column(Numeric(24,8), nullable=False)
+    reason = Column(Text, nullable=False)
+    opened_at = Column(DateTime(timezone=True), nullable=False)
+    closed_at = Column(DateTime(timezone=True), nullable=True, index=True)
+    exit_price = Column(Numeric(24,8), nullable=True)
+    pnl = Column(Numeric(24,8), nullable=True)
+    close_reason = Column(Text, nullable=True)
+    __table_args__ = (CheckConstraint("side IN ('buy','sell')", name='discord_position_side'),
+                      CheckConstraint("symbol = 'EURUSD'", name='discord_position_eurusd'),
+                      CheckConstraint('units > 0', name='discord_position_positive_units'))
+
+class AutomaticPaperControl(Base):
+    __tablename__ = 'automatic_paper_control'
+    id = Column(Integer, primary_key=True)
+    paused = Column(Boolean, nullable=False, default=False)
+    reason = Column(Text, nullable=False)
+    changed_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+    __table_args__ = (CheckConstraint('id = 1', name='automatic_paper_control_singleton'),)
+
 class Account(Base):
     __tablename__ = 'accounts'
     id = Column(String(36), primary_key=True, default=uid)

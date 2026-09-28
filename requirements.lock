@@ -1,4 +1,5 @@
 # Python 3.12 runtime lock; regenerate deliberately from requirements.txt.
+discord.py==2.6.4
 Mako==1.4.1
 MarkupSafe==3.0.3
 SQLAlchemy==2.0.36

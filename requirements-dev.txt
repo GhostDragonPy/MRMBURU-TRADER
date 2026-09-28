@@ -1,3 +1,4 @@
 -r requirements.lock
 pytest==8.3.4
+fakeredis[lua]==2.34.1
 httpx==0.28.1

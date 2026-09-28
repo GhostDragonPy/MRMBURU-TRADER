@@ -71,6 +71,36 @@ services:
       timeout: 5s
       retries: 3
     restart: unless-stopped
+  discord-bot:
+    build: .
+    profiles: [discord]
+    command: [python, -m, apps.discord_bot.main]
+    init: true
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [backend]
+    environment:
+      DISCORD_BOT_ENABLED: ${DISCORD_BOT_ENABLED:-false}
+      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
+      DISCORD_API_KEY: ${DISCORD_API_KEY:-}
+      DISCORD_GUILD_ID: ${DISCORD_GUILD_ID:-0}
+      DISCORD_ADMIN_ROLE_ID: ${DISCORD_ADMIN_ROLE_ID:-0}
+      DISCORD_ALLOWED_USER_IDS: ${DISCORD_ALLOWED_USER_IDS:-}
+      DISCORD_API_URL: http://api:8000
+      DISCORD_RATE_LIMIT_PER_MINUTE: ${DISCORD_RATE_LIMIT_PER_MINUTE:-10}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+    depends_on:
+      api: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, python, -m, apps.discord_bot.healthcheck]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
 networks:
   backend:
     internal: true

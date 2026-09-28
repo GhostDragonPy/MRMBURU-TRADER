@@ -23,3 +23,19 @@ def record(session, *, account_id, signal_id, trade_context, opened_at,
     session.add(row)
     session.flush()
     return {'journal_id': row.id, 'quality': quality}
+
+def close(session, *, signal_id, pnl, result_r, exit_reason, closed_at):
+    """Close the existing journal row for a paper signal."""
+    from sqlalchemy import select
+    row = session.scalar(select(JournalEntry).where(JournalEntry.signal_id == signal_id))
+    if row is None:
+        raise ValueError('Journal entry not found')
+    quality = classify(rule_compliant=bool(row.rule_compliant), pnl=pnl,
+                       execution_error=False, strategy_error=False)
+    row.pnl = pnl
+    row.result_r = result_r
+    row.outcome = quality['outcome']
+    row.error_type = quality['error_type']
+    row.exit_reason = exit_reason
+    row.closed_at = closed_at
+    session.flush()

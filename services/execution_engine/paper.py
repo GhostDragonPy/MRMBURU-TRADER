@@ -14,8 +14,18 @@ class PaperFill:
         self.venue = 'paper'
 
 
-def fill_paper(signal, tick: Tick) -> PaperFill:
+def fill_paper(signal, tick: Tick, *, slippage: Decimal = Decimal(0)) -> PaperFill:
     """Simulate a fill from cTrader bid/ask. Never sends an order to the broker."""
     ExecutionGateway().assert_no_live()
     price = tick.ask if signal.side == 'buy' else tick.bid
-    return PaperFill(signal, tick, Decimal(price))
+    direction = Decimal(1) if signal.side == 'buy' else Decimal(-1)
+    return PaperFill(signal, tick, Decimal(price) + direction*slippage)
+
+def close_paper(side: str, tick: Tick) -> Decimal:
+    """Return the executable paper exit side without contacting a broker."""
+    ExecutionGateway().assert_no_live()
+    if side == 'buy':
+        return Decimal(tick.bid)
+    if side == 'sell':
+        return Decimal(tick.ask)
+    raise ValueError('Invalid paper position side')

@@ -15,7 +15,8 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOAAccountAuthReq, ProtoOAApplicationAuthReq, ProtoOAAssetListReq,
     ProtoOAErrorRes, ProtoOAGetPositionUnrealizedPnLReq, ProtoOAGetTrendbarsReq,
     ProtoOAReconcileReq, ProtoOASubscribeSpotsReq, ProtoOASymbolByIdReq,
-    ProtoOASymbolsListReq, ProtoOATraderReq,
+    ProtoOASymbolsListReq, ProtoOATraderReq, ProtoOASubscribeLiveTrendbarReq,
+    ProtoOAGetAccountListByAccessTokenReq,
 )
 from services.ctrader.types import CTraderAuthRequired, CTraderUnavailable
 
@@ -28,7 +29,8 @@ READ_ONLY_REQUEST_TYPES = {
         ProtoOAApplicationAuthReq, ProtoOAAccountAuthReq, ProtoOAAssetListReq,
         ProtoOAGetPositionUnrealizedPnLReq, ProtoOAGetTrendbarsReq,
         ProtoOAReconcileReq, ProtoOASubscribeSpotsReq, ProtoOASymbolByIdReq,
-        ProtoOASymbolsListReq, ProtoOATraderReq,
+        ProtoOASymbolsListReq, ProtoOATraderReq, ProtoOASubscribeLiveTrendbarReq,
+        ProtoOAGetAccountListByAccessTokenReq,
     )
 }
 
@@ -37,7 +39,7 @@ class ReadOnlyOpenApi(AbstractContextManager):
     """Authenticated connection limited to an explicit read-only allowlist."""
 
     def __init__(self, *, client_id: str, client_secret: str, access_token: str,
-                 account_id: int, timeout: float = 10):
+                 account_id: int, timeout: float = 10, budget=None, environment='demo'):
         self.client_id = client_id
         self.client_secret = client_secret
         self.access_token = access_token
@@ -47,20 +49,37 @@ class ReadOnlyOpenApi(AbstractContextManager):
         self._ids = count(1)
         self._pending = deque()
         self._deadline = None
+        self._budget = budget
+        self._first_write_reserved = False
+        if environment not in ('demo', 'live'):
+            raise ValueError('Invalid broker environment')
+        self.environment = environment
+        self.host = 'demo.ctraderapi.com' if environment == 'demo' else DEMO_HOST
+        self._heartbeat_at = monotonic()
 
     def __enter__(self):
         try:
-            raw = socket.create_connection((DEMO_HOST, PROTOBUF_PORT), self.timeout)
+            # Refuse even a connection attempt when the shared budget is spent.
+            if self._budget is None:
+                raise CTraderUnavailable('cTrader transport requires a request budget')
+            self._budget.reserve()
+            self._first_write_reserved = True
+            raw = socket.create_connection((self.host, PROTOBUF_PORT), self.timeout)
             raw.settimeout(self.timeout)
-            self._socket = ssl.create_default_context().wrap_socket(raw, server_hostname=DEMO_HOST)
+            self._socket = ssl.create_default_context().wrap_socket(raw, server_hostname=self.host)
+            self._heartbeat_at = monotonic()
             self.request(ProtoOAApplicationAuthReq(
                 clientId=self.client_id, clientSecret=self.client_secret,
             ))
+            accounts = self.request(ProtoOAGetAccountListByAccessTokenReq(accessToken=self.access_token))
+            match = next((a for a in accounts.ctidTraderAccount if a.ctidTraderAccountId == self.account_id), None)
+            if match is None or match.isLive != (self.environment == 'live'):
+                raise CTraderUnavailable('Account absent or incompatible with broker environment')
             self.request(ProtoOAAccountAuthReq(
                 ctidTraderAccountId=self.account_id, accessToken=self.access_token,
             ))
             return self
-        except CTraderUnavailable:
+        except (CTraderUnavailable, CTraderAuthRequired):
             self.close()
             raise
         except (OSError, ssl.SSLError, ValueError) as exc:
@@ -78,12 +97,24 @@ class ReadOnlyOpenApi(AbstractContextManager):
                 self._socket = None
 
     def _write(self, payload, client_msg_id: str):
+        # Bootstrap can span several requests; keep it alive too, using the same
+        # guarded writer. Collector separately schedules idle heartbeats.
+        if payload.payloadType != ProtoHeartbeatEvent().payloadType and monotonic()-self._heartbeat_at >= 9:
+            self._write(ProtoHeartbeatEvent(), 'bootstrap-heartbeat')
+        if self._budget is None:
+            raise CTraderUnavailable('cTrader transport requires a request budget')
+        if self._first_write_reserved:
+            self._first_write_reserved = False
+        else:
+            self._budget.reserve()
         envelope = ProtoMessage(
             payloadType=payload.payloadType,
             payload=payload.SerializeToString(),
             clientMsgId=client_msg_id,
         ).SerializeToString()
         self._socket.sendall(struct.pack("!I", len(envelope)) + envelope)
+        if payload.payloadType == ProtoHeartbeatEvent().payloadType:
+            self._heartbeat_at = monotonic()
 
     def _read_exactly(self, size: int) -> bytes:
         chunks = bytearray()
@@ -107,8 +138,7 @@ class ReadOnlyOpenApi(AbstractContextManager):
             message = ProtoMessage()
             message.ParseFromString(self._read_exactly(size))
             if message.payloadType == ProtoHeartbeatEvent().payloadType:
-                self._write(ProtoHeartbeatEvent(), f"heartbeat-{next(self._ids)}")
-                return self.receive()
+                return message
             if message.payloadType == ProtoOAErrorRes().payloadType:
                 error = ProtoOAErrorRes()
                 error.ParseFromString(message.payload)

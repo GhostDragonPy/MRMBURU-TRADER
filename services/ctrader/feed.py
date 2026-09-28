@@ -173,4 +173,9 @@ class LiveCTraderFeed:
 def feed_from_settings(settings, redis_client=None):
     if not auth.access_token(settings, redis_client):
         raise CTraderAuthRequired('cTrader access token missing; complete OAuth before using market data')
+    if getattr(settings, 'ctrader_cached_feed', False):
+        from services.ctrader.stream import CachedFeed
+        return CachedFeed(settings, redis_client)
+    if not auth.access_token(settings, redis_client):
+        raise CTraderAuthRequired('cTrader access token missing; complete OAuth before using market data')
     return LiveCTraderFeed(settings, redis_client=redis_client)

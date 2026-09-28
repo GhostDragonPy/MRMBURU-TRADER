@@ -79,6 +79,12 @@ def exchange_code(settings, code: str):
 def open_demo(settings, redis_client=None):
     """Legacy function name: connects to configured read-only source, never submits orders."""
     from services.ctrader.openapi import ReadOnlyOpenApi
+    from services.ctrader.budget import RequestBudget
+
+    if not settings.ctrader_network_enabled:
+        raise CTraderUnavailable('cTrader network disabled by configuration')
+    if redis_client is None:
+        raise CTraderUnavailable('Shared cTrader request budget requires Redis')
 
     token = access_token(settings, redis_client)
     if not token:
@@ -96,4 +102,7 @@ def open_demo(settings, redis_client=None):
         client_secret=settings.ctrader_client_secret.get_secret_value(),
         access_token=token,
         account_id=account_id,
+        environment=settings.ctrader_environment,
+        budget=RequestBudget(redis_client, account_id,
+            settings.ctrader_requests_per_24h, settings.ctrader_requests_per_minute),
     )

@@ -366,10 +366,14 @@ def create_app(settings=None, factory=None, redis_client=None):
         def cached(key):
             value = redis_client.get(key)
             return value.decode() if isinstance(value, bytes) else value
+        from services.ctrader.stream import prefix
         return dict(enabled=settings.paper_scheduler_enabled, account_id=settings.paper_account_id,
+            strategy=settings.paper_strategy, broker_environment=settings.ctrader_environment,
+            network_enabled=settings.ctrader_network_enabled,
+            collector=cached(prefix(settings)+':status'), session=cached('paper:session'),
             state=row.state if row else None, events=[e.payload for e in events],
             last_success=cached('paper:last_success'), last_error=cached('paper:last_error'),
-            news_known=False, unknown_news_waived=settings.paper_allow_unknown_news,
+            news_known=bool(row and row.state.get('news_known')), unknown_news_waived=settings.paper_allow_unknown_news,
             execution_enabled=False)
 
     @app.post('/paper/v04/enable-account', dependencies=[Depends(admin)])
@@ -409,5 +413,8 @@ def create_app(settings=None, factory=None, redis_client=None):
     @app.post('/control/resume-paper', dependencies=[Depends(admin)])
     def resume(body:Control,s=Depends(db)):
         return set_kill_switch(s,active=False,reason=body.reason,actor='admin')
+
+    from apps.api.discord import mount as mount_discord
+    mount_discord(app, settings=settings, factory=factory, redis_client=redis_client, db=db)
 
     return app

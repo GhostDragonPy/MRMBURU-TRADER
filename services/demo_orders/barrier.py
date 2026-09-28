@@ -49,13 +49,14 @@ class TradingMessageBarrier:
             self.denied.append(payload_type)
             raise DemoGuardError('TRADING_PERMISSION_UNVERIFIED')
         if self.profile == 'canary':
-            if payload_type != NEW_ORDER:
+            if payload_type == NEW_ORDER:
+                if self._persistent_consumed():
+                    self.denied.append(payload_type)
+                    raise DemoGuardError('CANARY_ORDER_CAP')
+                self._mark_consumed()
+            elif payload_type not in (AMEND_SLTP, CLOSE_POSITION):
                 self.denied.append(payload_type)
                 raise DemoGuardError('TRADING_MESSAGE_BLOCKED')
-            if self._persistent_consumed():
-                self.denied.append(payload_type)
-                raise DemoGuardError('CANARY_ORDER_CAP')
-            self._mark_consumed()
         self.allowed_trading.append(payload_type)
         return True
 

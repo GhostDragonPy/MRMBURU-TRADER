@@ -39,6 +39,7 @@ class FakeDemoSession:
         self.instrument = {
             'symbol_id': 1, 'min_volume': '1000', 'max_volume': '1000000',
             'step_volume': '1000', 'lot_size': '100000',
+            'digits': 5, 'pip_position': 4,
         }
 
     def authenticate(self, **kwargs):
@@ -59,6 +60,9 @@ class FakeDemoSession:
     def symbol(self, name, account_id):
         assert name == 'EURUSD'
         return self.instrument
+
+    def quote(self, symbol_id):
+        return {'bid': '1.10000', 'ask': '1.10010'}
 
     def new_order(self, account_id, request):
         self.new_orders.append(request)
@@ -340,6 +344,22 @@ def test_zero_real_socket_use(monkeypatch):
     assert session.closed is True
 
 
-def test_paper_path_unchanged(factory):
+def test_diagnostic_canary_is_not_esses_and_closes(factory):
+    session = FakeDemoSession()
+    t = transport(session)
+    with factory.begin() as db:
+        db.get(KillSwitch, 1).active = False
+        demo = service.control(db)
+        demo.rollout = 'canary'
+        demo.armed_at = NOW - timedelta(seconds=5)
+        from services.demo_orders.preflight import record_preflight
+        record_preflight(db, demo_settings(), now=NOW - timedelta(seconds=5))
+        out = service.place_diagnostic_canary(
+            db, demo_settings(), DemoCTraderExecutionGateway(t), now=NOW)
+        assert out['kind'] == 'diagnostic-canary'
+        assert out['closed'] is True
+        assert service.control(db).canary_consumed is True
+        assert session.new_orders[0]['label'] == 'MRMBURU-CANARY'
+        assert session.closes == [out['position_id']]
     from tests.test_esses import test_position_management_survives_missing_history_and_news
     test_position_management_survives_missing_history_and_news(factory)

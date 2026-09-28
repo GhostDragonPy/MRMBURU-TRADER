@@ -114,6 +114,10 @@ def on_paper_cycle(session, settings, result, *, now, gateway, token_scope, paus
     except DemoGuardError as exc:
         _block_demo(session, str(exc))
         return {'blocked': str(exc)}
+    unknown = session.scalars(select(DemoOrderIntent).where(
+        DemoOrderIntent.status == 'uncertain')).first()
+    if unknown is not None:
+        return {'blocked': 'UNKNOWN'}
     if demo.blocked or demo.protection_failed:
         return {'blocked': demo.reason}
     if gate is None or gate.active:
@@ -247,8 +251,9 @@ def _handle_open(session, settings, event, now, gateway: DemoCTraderExecutionGat
         recovered = gateway.reconcile(signal_id)
         if recovered and recovered.get('position_id'):
             return _fill(session, intent, demo, recovered, today, canary)
-        intent.response = {'reason': 'reconciled-no-fill'}
-        return {'signal_id': signal_id, 'status': 'uncertain'}
+        intent.response = {'reason': 'UNKNOWN'}
+        _block_demo(session, 'UNKNOWN')
+        return {'signal_id': signal_id, 'status': 'uncertain', 'reason': 'UNKNOWN'}
     except DemoGuardError as exc:
         intent.status = 'failed'
         intent.response = {'reason': str(exc)}
@@ -314,6 +319,101 @@ def emergency_stop(session, reason):
     return {'blocked': True, 'rollout': demo.rollout, 'positions_closed': False}
 
 
+def _news_status(redis_client):
+    if redis_client is None:
+        return 'unknown'
+    try:
+        from zoneinfo import ZoneInfo
+        day = datetime.now(ZoneInfo('America/New_York')).date().isoformat()
+        raw = redis_client.get('esses:news:' + day)
+        return 'loaded' if raw else 'missing'
+    except Exception:
+        return 'unknown'
+
+
+CANARY_SIGNAL_ID = 'MRMBURU-CANARY-DIAGNOSTIC'
+
+
+def place_diagnostic_canary(session, settings, gateway, *, now=None):
+    """One authorized DEMO diagnostic order. Not an Esses signal."""
+    now = now or datetime.now(timezone.utc)
+    demo = control(session)
+    if settings.trading_mode != 'demo-orders' or not settings.demo_execution_enabled:
+        raise DemoGuardError('DEMO execution is not enabled')
+    if demo.rollout != 'canary':
+        raise DemoGuardError('Diagnostic canary requires rollout=canary')
+    if demo.blocked or demo.protection_failed:
+        raise DemoGuardError(demo.reason or 'DEMO blocked')
+    if demo.canary_consumed:
+        raise DemoGuardError('CANARY_ALREADY_USED')
+    require_preflight(session, settings, now=now)
+    existing = session.get(DemoOrderIntent, CANARY_SIGNAL_ID)
+    if existing is not None:
+        raise DemoGuardError('CANARY_ALREADY_USED')
+    snap = gateway.snapshot()
+    instrument = snap['instrument']
+    volume = _normalize_volume(instrument['min_volume'], instrument, canary=True)
+    quote = getattr(gateway.transport.session, 'quote', None)
+    if quote is None:
+        raise DemoGuardError('Quote unavailable')
+    prices = quote(instrument['symbol_id'])
+    ask = D(prices['ask'])
+    bid = D(prices['bid'])
+    pip_pos = int(instrument.get('pip_position') or 4)
+    pip = D(10) ** (-pip_pos)
+    stop = ask - (pip * 10)
+    target = ask + (pip * 20)
+    intent = DemoOrderIntent(
+        signal_id=CANARY_SIGNAL_ID, status='sent',
+        request={'kind': 'diagnostic-canary', 'symbol': 'EURUSD', 'side': 'buy',
+                 'volume': str(volume), 'day': now.date().isoformat()},
+        response={})
+    session.add(intent)
+    session.flush()
+    order = {
+        'symbol': 'EURUSD', 'side': 'buy', 'volume': str(volume),
+        'stop_loss': str(stop), 'take_profit': str(target),
+        'signal_id': CANARY_SIGNAL_ID,
+        'label': 'MRMBURU-CANARY',
+        'client_order_id': 'MRMBURU-CANARY-DIAG',
+        'entry': str(ask),
+    }
+    try:
+        result = gateway.submit_market(order)
+    except UncertainBrokerResult:
+        recovered = gateway.reconcile(CANARY_SIGNAL_ID)
+        if not recovered or not recovered.get('position_id'):
+            intent.status = 'uncertain'
+            intent.response = {'reason': 'UNKNOWN'}
+            _block_demo(session, 'UNKNOWN')
+            raise DemoGuardError('UNKNOWN')
+        result = recovered
+    except DemoGuardError as exc:
+        intent.status = 'failed'
+        intent.response = {'reason': str(exc)}
+        _block_demo(session, str(exc))
+        raise
+    if not result.get('sl_confirmed'):
+        demo.protection_failed = True
+        _block_demo(session, 'SL_UNCONFIRMED')
+        intent.status = 'failed'
+        intent.response = dict(result, reason='SL_UNCONFIRMED')
+        raise DemoGuardError('SL_UNCONFIRMED')
+    filled = _fill(session, intent, demo, result, now.date().isoformat(), canary=True)
+    closed = gateway.close_owned(result['position_id'], owned_ids={result['position_id']})
+    intent.response = dict(intent.response or {}, closed=True, close=closed)
+    return {
+        'status': 'closed',
+        'order_id': filled.get('order_id'),
+        'position_id': str(result.get('position_id') or ''),
+        'sl_confirmed': True,
+        'tp_confirmed': True,
+        'closed': True,
+        'kind': 'diagnostic-canary',
+        'bid': str(bid),
+    }
+
+
 def status_payload(session, settings, token_scope, *, redis_client=None):
     from services.ctrader.stream import active
     demo = control(session)
@@ -360,6 +460,10 @@ def status_payload(session, settings, token_scope, *, redis_client=None):
         'execution_enabled': False,
         'demo_execution_enabled': bool(settings.demo_execution_enabled),
         'paper_available': True,
+        'paper_scheduler_enabled': bool(settings.paper_scheduler_enabled),
         'canary_consumed': bool(demo.canary_consumed),
         'armed_at': demo.armed_at.isoformat() if demo.armed_at else None,
+        'host': 'demo.ctraderapi.com',
+        'is_live': False,
+        'news_status': _news_status(redis_client),
     }

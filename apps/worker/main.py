@@ -52,7 +52,8 @@ def paper_loop(settings, factory, cache, stop, demo_sdk=None):
                                 cache.set('demo:socket', json_lib.dumps(sess.snapshot_status()))
                                 if sess.trading_permission == 'VERIFIED':
                                     cache.set('demo:preflight:ok', '1', ex=3600)
-                        gw = build_gateway(settings, cache, db_session=session, token_scope=scope)
+                        gw = build_gateway(settings, cache, db_session=session, token_scope=scope,
+                            protobuf_session=sess, rollout=demo.rollout)
                         on_paper_cycle(session, settings, result, now=datetime.now(timezone.utc),
                             gateway=gw, token_scope=scope, redis_client=cache)
                 else:

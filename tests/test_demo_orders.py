@@ -228,6 +228,22 @@ def test_restart_does_not_duplicate(factory):
     assert again['results'][0]['duplicate'] is True
 
 
+def test_timeout_unknown_emergency_stop(factory):
+    transport = FakeTransport(timeout=True)
+    with factory.begin() as session:
+        out = run(session, demo_settings(), [opened_event()], transport)
+        assert out['results'][0]['status'] == 'uncertain'
+        assert out['results'][0]['reason'] == 'UNKNOWN'
+        assert service.control(session).blocked is True
+        other = {'kind': 'opened', 'position': {
+            'side': 'sell', 'units': '1000', 'entry': '1.10', 'stop': '1.11', 'target': '1.08',
+            'risk': '20', 'bar': NOW.isoformat(), 'context': {'setup_id': 'setup-unknown'},
+        }}
+        second = run(session, demo_settings(), [other], transport, reset=False)
+    assert second['blocked'] == 'UNKNOWN'
+    assert len(transport.submits) == 1
+
+
 def test_timeout_reconciles_without_blind_resend(factory):
     transport = FakeTransport(timeout=True)
     sid_payload = {

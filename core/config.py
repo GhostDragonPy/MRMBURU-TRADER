@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     ctrader_requests_per_24h: int = Field(default=1000, ge=1, le=1000)
     ctrader_redirect_uri: str = 'https://trader.acshop.shop/research/ctrader/callback'
     ctrader_broker_orders: bool = False
+    prop_sim_ctrader_account_id: Optional[str] = None
+    prop_sim_execution_enabled: Literal[False] = False
+    prop_sim_allowed_account_ids: str = '17204978'
+    prop_sim_acknowledged_live_environment: bool = False
     discord_bot_enabled: bool = False
     discord_bot_token: Optional[SecretStr] = None
     discord_api_key: Optional[SecretStr] = None
@@ -50,7 +54,7 @@ class Settings(BaseSettings):
     discord_api_url: str = 'http://api:8000'
     discord_rate_limit_per_minute: int = Field(default=10, ge=1, le=60)
 
-    @field_validator('execution_enabled', 'allow_live_trading', mode='before')
+    @field_validator('execution_enabled', 'allow_live_trading', 'prop_sim_execution_enabled', mode='before')
     @classmethod
     def coerce_execution_enabled(cls, value):
         # Env vars arrive as strings; Literal[False] rejects "false" without coercion.
@@ -82,7 +86,16 @@ class Settings(BaseSettings):
                         self.discord_allowed_user_ids.strip())):
                 raise ValueError('Discord bot configuration is incomplete')
         from services.demo_orders.guards import validate_settings
+        from services.ctrader.guards_accounts import FORBIDDEN_EXECUTION_ACCOUNTS
         validate_settings(self)
+        prop_id = (self.prop_sim_ctrader_account_id or '').strip()
+        if prop_id in FORBIDDEN_EXECUTION_ACCOUNTS:
+            raise ValueError('48803059 cannot be used as PROP_SIM_CTRADER_ACCOUNT_ID')
+        allowed = [item.strip() for item in (self.prop_sim_allowed_account_ids or '').split(',') if item.strip()]
+        if any(item in FORBIDDEN_EXECUTION_ACCOUNTS for item in allowed):
+            raise ValueError('48803059 cannot be allowlisted for prop-sim')
+        if prop_id and allowed and prop_id not in allowed:
+            raise ValueError('PROP_SIM_CTRADER_ACCOUNT_ID must be in PROP_SIM_ALLOWED_ACCOUNT_IDS')
         return self
 
     @property

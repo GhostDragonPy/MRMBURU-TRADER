@@ -2,6 +2,7 @@ from urllib.parse import urlencode
 from services.providers.http import ProviderError, request_form
 from services.ctrader.types import CTraderAuthRequired, CTraderUnavailable
 from services.ctrader import tokens as token_store
+from services.ctrader import oauth_state
 
 CTRADER_AUTH = 'https://openapi.ctrader.com/apps/auth'
 CTRADER_TOKEN = 'https://openapi.ctrader.com/apps/token'
@@ -29,13 +30,26 @@ def status(settings, redis_client=None):
         'provider': 'ctrader',
         'configured': ready,
         'authorized': bool(access_token(settings, redis_client)),
+        'market_data_account_id': settings.ctrader_account_id,
         'account_id': settings.ctrader_account_id,
+        'prop_sim_account_id': None,
         'scope': token_store.effective_scope(redis_client) if redis_client is not None else None,
         'market_data': 'principal',
         'execution_enabled': False,
+        'prop_sim_execution_enabled': False,
         'orders': 'disabled',
         'redirect_uri': redirect,
     }
+    if redis_client is not None:
+        profiles = token_store.profiles_status(redis_client)
+        payload['profiles'] = {
+            'market_data': {'present': profiles['market_data']['present'],
+                            'execution_usable': False},
+            'prop_sim': {'present': profiles['prop_sim']['present'],
+                         'execution_usable': False,
+                         'account': profiles['prop_sim']['account_id']},
+        }
+        payload['prop_sim_account_id'] = profiles['prop_sim']['account_id']
     if ready and redirect:
         query = urlencode({
             'client_id': settings.ctrader_client_id.get_secret_value(),
@@ -48,10 +62,15 @@ def status(settings, redis_client=None):
     return payload
 
 
-def authorization_url(settings, redis_client):
+def authorization_url(settings, redis_client, *, purpose='market-data'):
     if not configured(settings):
         raise CTraderAuthRequired('cTrader client id/secret are not set')
-    state = token_store.begin_login(redis_client, scope='trading')
+    expected = ''
+    if purpose == 'prop-sim':
+        from services.ctrader.prop_sim import expected_account
+        expected = expected_account(settings)
+    state = oauth_state.issue(
+        settings, redis_client, purpose=purpose, expected_account=expected, scope='trading')
     query = urlencode({
         'client_id': settings.ctrader_client_id.get_secret_value(),
         'redirect_uri': settings.ctrader_redirect_uri,
@@ -65,7 +84,8 @@ def authorization_url(settings, redis_client):
 def authorization_url_accounts(settings, redis_client):
     if not configured(settings):
         raise CTraderAuthRequired('cTrader client id/secret are not set')
-    state = token_store.begin_login(redis_client, scope='accounts')
+    state = oauth_state.issue(
+        settings, redis_client, purpose='market-data', expected_account='', scope='accounts')
     query = urlencode({
         'client_id': settings.ctrader_client_id.get_secret_value(),
         'redirect_uri': settings.ctrader_redirect_uri,
@@ -94,6 +114,7 @@ def exchange_code(settings, code: str):
 
 def _session(settings, redis_client):
     from services.ctrader.budget import RequestBudget
+    from services.ctrader.guards_accounts import FORBIDDEN_EXECUTION_ACCOUNTS
 
     if not settings.ctrader_network_enabled:
         raise CTraderUnavailable('cTrader network disabled by configuration')
@@ -111,6 +132,8 @@ def _session(settings, redis_client):
         account_id = int(settings.ctrader_account_id)
     except (TypeError, ValueError) as exc:
         raise CTraderAuthRequired('cTrader account id must be numeric') from exc
+    if getattr(settings, 'ctrader_broker_orders', False) and str(account_id) in FORBIDDEN_EXECUTION_ACCOUNTS:
+        raise CTraderAuthRequired('Forbidden execution account')
     return dict(
         client_id=settings.ctrader_client_id.get_secret_value(),
         client_secret=settings.ctrader_client_secret.get_secret_value(),

@@ -146,6 +146,11 @@ class OfficialDemoTransport:
         return listed
 
     def _ensure(self):
+        if self.budget is None:
+            raise DemoGuardError('RequestBudget is required')
+        if getattr(self.session, 'account_auth', False):
+            self._ready = True
+            return
         if not self._ready:
             self.connect()
 
@@ -193,15 +198,18 @@ class OfficialDemoTransport:
                 return result
             instrument = self._instrument or self._load_instrument()
             volume = normalize_volume(order['volume'], instrument)
+            label = str(order.get('label') or LABEL)
+            if not label.startswith(LABEL):
+                raise DemoGuardError('Refusing unlabeled DEMO order')
             request = {
                 'symbol_id': instrument['symbol_id'],
                 'side': order['side'],
                 'volume': volume,
                 'stop_loss': str(order['stop_loss']),
                 'take_profit': str(order['take_profit']),
-                'label': LABEL,
-                'client_order_id': cid,
-                'comment': LABEL,
+                'label': label[:50],
+                'client_order_id': str(order.get('client_order_id') or cid)[:50],
+                'comment': label[:50],
             }
             try:
                 self._sent_new_orders += 1
@@ -261,7 +269,7 @@ class OfficialDemoTransport:
     def close_position(self, position_id):
         self._ensure()
         owned = self.session.position(self.account_id, position_id)
-        if owned is None or owned.get('label') != LABEL:
+        if owned is None or not str(owned.get('label') or '').startswith(LABEL):
             raise DemoGuardError('Refusing to manage a foreign position')
         closed = self.session.close_position(self.account_id, position_id, owned.get('volume'))
         return sanitize({'closed': str(position_id), 'status': closed.get('status')})

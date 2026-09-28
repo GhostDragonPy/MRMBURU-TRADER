@@ -8,6 +8,31 @@ from sqlalchemy.pool import StaticPool
 from core.models import Base, KillSwitch
 from core.contracts import Signal, AccountState, MarketState
 
+ISOLATE_ENV = (
+    'TRADING_MODE', 'DEMO_EXECUTION_ENABLED', 'DEMO_CTRADER_ACCOUNT_ID',
+    'ESSES_BROKER_EXECUTION', 'CTRADER_ACCOUNT_ID', 'CTRADER_CLIENT_ID',
+    'CTRADER_CLIENT_SECRET', 'CTRADER_ACCESS_TOKEN', 'CTRADER_NETWORK_ENABLED',
+    'DISCORD_BOT_ENABLED', 'DISCORD_BOT_TOKEN', 'DISCORD_API_KEY',
+    'DISCORD_GUILD_ID', 'DISCORD_ADMIN_ROLE_ID', 'DISCORD_CHANNEL_ID',
+    'DISCORD_ALLOWED_USER_IDS',
+    'DEEPSEEK_API_KEY', 'FRED_API_KEY', 'PAPER_SCHEDULER_ENABLED',
+    'PAPER_ALLOW_UNKNOWN_NEWS', 'PAPER_ACCOUNT_ID',
+    'DEEPSEEK_API_KEY', 'FRED_API_KEY', 'PAPER_SCHEDULER_ENABLED',
+    'EXECUTION_ENABLED', 'ALLOW_LIVE_TRADING', 'PROP_SIM_CTRADER_ACCOUNT_ID',
+    'PROP_SIM_EXECUTION_ENABLED', 'PROP_SIM_ALLOWED_ACCOUNT_IDS',
+    'PROP_SIM_ACKNOWLEDGED_LIVE_ENVIRONMENT',
+)
+
+
+@pytest.fixture(autouse=True)
+def isolate_process_env(monkeypatch):
+    for key in ISOLATE_ENV:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv('ALLOW_LIVE_TRADING', 'false')
+    monkeypatch.setenv('EXECUTION_ENABLED', 'false')
+    monkeypatch.setenv('PROP_SIM_EXECUTION_ENABLED', 'false')
+
+
 @pytest.fixture
 def now(): return datetime.now(timezone.utc)
 @pytest.fixture

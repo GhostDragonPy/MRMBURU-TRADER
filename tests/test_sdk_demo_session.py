@@ -1,10 +1,14 @@
 from unittest.mock import Mock
 import pytest
 from ctrader_open_api.messages.OpenApiMessages_pb2 import (
-    ProtoOAAccountAuthRes, ProtoOAApplicationAuthRes, ProtoOAGetAccountListByAccessTokenRes,
-    ProtoOANewOrderReq, ProtoOASymbolByIdRes, ProtoOASymbolsListRes,
+    ProtoOAAccountAuthRes, ProtoOAApplicationAuthRes, ProtoOAExecutionEvent,
+    ProtoOAGetAccountListByAccessTokenRes, ProtoOANewOrderReq, ProtoOAReconcileRes,
+    ProtoOASubscribeSpotsRes, ProtoOASymbolByIdRes, ProtoOASymbolsListRes,
+    ProtoOATraderRes, ProtoOAUnsubscribeSpotsRes,
 )
-from ctrader_open_api.messages.OpenApiModelMessages_pb2 import ProtoOAClientPermissionScope
+from ctrader_open_api.messages.OpenApiModelMessages_pb2 import (
+    ProtoOAClientPermissionScope, ProtoOAExecutionType, ProtoOAPositionStatus,
+)
 from services.demo_orders.barrier import NEW_ORDER, TradingMessageBarrier
 from services.demo_orders.guards import DEMO_HOST, DemoGuardError
 from services.demo_orders.preflight import record_preflight
@@ -72,8 +76,44 @@ class FakeDriver:
             meta.minVolume = 1000
             meta.stepVolume = 1000
             meta.maxVolume = 1000000
+            meta.digits = 5
+            meta.pipPosition = 4
+            meta.lotSize = 10000000
             return res
+        if name == 'ProtoOATraderReq':
+            res = ProtoOATraderRes()
+            res.trader.balance = 10000000
+            res.trader.moneyDigits = 2
+            return res
+        if name == 'ProtoOAReconcileReq':
+            return ProtoOAReconcileRes()
+        if name == 'ProtoOASubscribeSpotsReq':
+            return ProtoOASubscribeSpotsRes()
+        if name == 'ProtoOAUnsubscribeSpotsReq':
+            return ProtoOAUnsubscribeSpotsRes()
         raise AssertionError(name)
+
+    def await_execution(self, payload, client_msg_id, timeout):
+        self.send(payload, client_msg_id)
+        event = ProtoOAExecutionEvent()
+        event.executionType = ProtoOAExecutionType.ORDER_FILLED
+        event.order.orderId = 11
+        event.order.positionId = 22
+        event.order.clientOrderId = getattr(payload, 'clientOrderId', '')
+        if getattr(payload, 'stopLoss', None):
+            event.order.stopLoss = payload.stopLoss
+            event.position.stopLoss = payload.stopLoss
+        if getattr(payload, 'takeProfit', None):
+            event.order.takeProfit = payload.takeProfit
+            event.position.takeProfit = payload.takeProfit
+        event.position.positionId = 22
+        event.position.price = 1.10010
+        event.position.tradeData.label = getattr(payload, 'label', 'MRMBURU') or 'MRMBURU'
+        event.position.tradeData.volume = int(getattr(payload, 'volume', 1000) or 1000)
+        event.deal.orderId = 11
+        event.deal.positionId = 22
+        event.deal.executionPrice = 1.10010
+        return event
 
 
 def sdk_session(driver=None, profile='probe', demo_execution_enabled=False,
@@ -180,3 +220,70 @@ def test_tls_driver_never_uses_live_connect(monkeypatch):
     with pytest.raises(DemoGuardError, match='LIVE endpoint'):
         driver.connect()
     connect.assert_not_called()
+
+
+def test_probe_blocks_new_order():
+    session = sdk_session(profile='probe')
+    session.authenticate()
+    with pytest.raises(DemoGuardError, match='TRADING_MESSAGE_BLOCKED'):
+        session.new_order(1001, {
+            'symbol_id': 1, 'side': 'buy', 'volume': 1000,
+            'stop_loss': '1.09', 'take_profit': '1.13',
+            'label': 'MRMBURU', 'client_order_id': 'MRMBURU-x',
+        })
+    assert session.writes.count('ProtoOANewOrderReq') == 0
+    session.close()
+
+
+def test_enabled_session_sends_one_new_order():
+    session = sdk_session(profile='enabled', demo_execution_enabled=True,
+                          trading_permission='VERIFIED')
+    session.authenticate()
+    session.symbol('EURUSD', 1001)
+    filled = session.new_order(1001, {
+        'symbol_id': 1, 'side': 'buy', 'volume': 1000,
+        'stop_loss': '1.09000', 'take_profit': '1.13000',
+        'label': 'MRMBURU', 'client_order_id': 'MRMBURU-sig',
+    })
+    assert filled['order_id'] == '11'
+    assert filled['position_id'] == '22'
+    assert filled['sl_confirmed'] is True
+    assert session.writes.count('ProtoOANewOrderReq') == 1
+    session.close()
+
+
+def test_canary_allows_one_new_order_then_close():
+    session = sdk_session(profile='canary', demo_execution_enabled=True,
+                          trading_permission='VERIFIED')
+    session.authenticate()
+    session.new_order(1001, {
+        'symbol_id': 1, 'side': 'buy', 'volume': 1000,
+        'stop_loss': '1.09', 'take_profit': '1.13',
+        'label': 'MRMBURU-CANARY', 'client_order_id': 'MRMBURU-CANARY-DIAG',
+    })
+    with pytest.raises(DemoGuardError, match='CANARY_ORDER_CAP'):
+        session.new_order(1001, {
+            'symbol_id': 1, 'side': 'buy', 'volume': 1000,
+            'stop_loss': '1.09', 'take_profit': '1.13',
+            'label': 'MRMBURU-CANARY', 'client_order_id': 'MRMBURU-CANARY-2',
+        })
+    closed = session.close_position(1001, 22, 1000)
+    assert closed['closed'] == '22'
+    session.close()
+
+
+def test_worker_passes_persistent_session(factory):
+    cfg = demo_settings()
+    with factory.begin() as db:
+        from services.demo_orders import service
+        service.control(db).rollout = 'enabled'
+        from services.demo_orders.preflight import record_preflight
+        record_preflight(db, cfg, now=datetime.now(timezone.utc), extra_detail={
+            'trading_permission': 'VERIFIED', 'socket': 'sdk-tls'})
+        sess = FakeDemoSession()
+        sess.account_auth = True
+        gw = build_gateway(cfg, Mock(), db_session=db, token_scope='trading',
+                           protobuf_session=sess, rollout='enabled')
+        from services.demo_orders.transport import OfficialDemoTransport
+        assert isinstance(gw.transport, OfficialDemoTransport)
+        assert gw.transport.session is sess

@@ -18,10 +18,13 @@ NOW = datetime(2026, 9, 22, 13, 30, tzinfo=timezone.utc)
 
 
 def demo_settings(**kw):
-    return settings(
+    values = dict(
         trading_mode='demo-orders', demo_execution_enabled=True,
         esses_broker_execution=True, allow_live_trading=False,
-        demo_ctrader_account_id='1001', ctrader_environment='demo', **kw)
+        demo_ctrader_account_id='1001', ctrader_environment='demo',
+        ctrader_account_id='')
+    values.update(kw)
+    return settings(**values)
 
 
 class FakeTransport:

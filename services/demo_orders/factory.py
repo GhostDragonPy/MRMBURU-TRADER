@@ -1,4 +1,4 @@
-"""Refuse LIVE wiring. Real DEMO sockets stay unconfigured until activation."""
+"""Refuse LIVE wiring. OfficialDemoTransport exists but is not connected here."""
 from services.demo_orders.gateway import DemoCTraderExecutionGateway
 from services.demo_orders.guards import DEMO_HOST, LIVE_ACCOUNT_IDS, DemoGuardError, validate_settings
 

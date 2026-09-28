@@ -12,7 +12,7 @@ CAT = '🐈'
 
 ADMIN_COMMANDS = (
     'status', 'positions', 'history', 'daily_report',
-    'pause', 'resume', 'paper_order', 'paper_close',
+    'pause', 'resume', 'paper_order', 'paper_close', 'broker_order',
 )
 PERSONAL_COMMANDS = ('ayuda', 'identidad', 'clima', 'tokens', 'recordatorio', 'buscar')
 
@@ -21,7 +21,7 @@ def banner():
     return (
         f'{CAT} **{DISPLAY_NAME}** — {PERSONA} de MRMBURU ({DISPLAY_CHANNEL}).\n'
         f'Modo **{MODE}**. `execution_enabled={str(EXECUTION_ENABLED).lower()}`. '
-        'No envío órdenes a cTrader.'
+        'Esses y `/paper_order` son paper. `/broker_order` es orden real mínima.'
     )
 
 
@@ -35,7 +35,8 @@ def help_text():
         'Los comandos se autorizan por ID de guild, canal, usuario y rol, no por nombres. '
         'Pausa/reanudación solo afecta entradas automáticas paper. '
         '`/paper_order` y `/paper_close` usan la cuenta aislada `discord-sandbox`. '
-        'Ningún comando envía órdenes reales ni muestra secretos.'
+        '`/broker_order` envía el volumen mínimo de EURUSD a cTrader (cuenta del .env) '
+        'solo con confirmación. Esses sigue en paper; ExecutionGateway no abre el resto.'
     )
 
 

@@ -33,6 +33,7 @@ READ_ONLY_REQUEST_TYPES = {
         ProtoOAGetAccountListByAccessTokenReq,
     )
 }
+ALLOWED_WRITES = READ_ONLY_REQUEST_TYPES | {ProtoHeartbeatEvent().payloadType}
 
 
 class ReadOnlyOpenApi(AbstractContextManager):
@@ -51,6 +52,7 @@ class ReadOnlyOpenApi(AbstractContextManager):
         self._deadline = None
         self._budget = budget
         self._first_write_reserved = False
+        self.allowed_writes = set(ALLOWED_WRITES)
         if environment not in ('demo', 'live'):
             raise ValueError('Invalid broker environment')
         self.environment = environment
@@ -97,6 +99,8 @@ class ReadOnlyOpenApi(AbstractContextManager):
                 self._socket = None
 
     def _write(self, payload, client_msg_id: str):
+        if payload.payloadType not in self.allowed_writes:
+            raise CTraderUnavailable('Blocked non-read-only cTrader request')
         # Bootstrap can span several requests; keep it alive too, using the same
         # guarded writer. Collector separately schedules idle heartbeats.
         if payload.payloadType != ProtoHeartbeatEvent().payloadType and monotonic()-self._heartbeat_at >= 9:
@@ -183,6 +187,36 @@ class ReadOnlyOpenApi(AbstractContextManager):
             response.ParseFromString(envelope.payload)
             if predicate(response):
                 return response
+
+
+class TradingOpenApi(ReadOnlyOpenApi):
+    """Same auth as read-only, plus a single market NewOrder path."""
+
+    def __init__(self, **kwargs):
+        from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOANewOrderReq
+        super().__init__(**kwargs)
+        self.allowed_writes.add(ProtoOANewOrderReq().payloadType)
+
+    def send_market(self, *, symbol_id: int, side: str, volume: int):
+        from ctrader_open_api.messages.OpenApiMessages_pb2 import (
+            ProtoOAExecutionEvent, ProtoOANewOrderReq,
+        )
+        from ctrader_open_api.messages.OpenApiModelMessages_pb2 import ProtoOAOrderType, ProtoOATradeSide
+        if side not in ('buy', 'sell'):
+            raise CTraderUnavailable('Invalid trade side')
+        if volume <= 0:
+            raise CTraderUnavailable('Invalid volume')
+        request = ProtoOANewOrderReq(
+            ctidTraderAccountId=self.account_id,
+            symbolId=symbol_id,
+            orderType=ProtoOAOrderType.MARKET,
+            tradeSide=ProtoOATradeSide.BUY if side == 'buy' else ProtoOATradeSide.SELL,
+            volume=volume,
+        )
+        self._deadline = monotonic() + self.timeout
+        client_msg_id = f"mrmburu-{next(self._ids)}-{uuid4().hex}"
+        self._write(request, client_msg_id)
+        return self.wait_for(ProtoOAExecutionEvent)
 
 
 def _message_class(payload_type: int):

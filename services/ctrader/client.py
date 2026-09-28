@@ -78,9 +78,7 @@ def exchange_code(settings, code: str):
         raise CTraderUnavailable(str(exc)) from exc
 
 
-def open_demo(settings, redis_client=None):
-    """Legacy function name: connects to configured read-only source, never submits orders."""
-    from services.ctrader.openapi import ReadOnlyOpenApi
+def _session(settings, redis_client):
     from services.ctrader.budget import RequestBudget
 
     if not settings.ctrader_network_enabled:
@@ -99,7 +97,7 @@ def open_demo(settings, redis_client=None):
         account_id = int(settings.ctrader_account_id)
     except (TypeError, ValueError) as exc:
         raise CTraderAuthRequired('cTrader account id must be numeric') from exc
-    return ReadOnlyOpenApi(
+    return dict(
         client_id=settings.ctrader_client_id.get_secret_value(),
         client_secret=settings.ctrader_client_secret.get_secret_value(),
         access_token=token,
@@ -108,3 +106,16 @@ def open_demo(settings, redis_client=None):
         budget=RequestBudget(redis_client, account_id,
             settings.ctrader_requests_per_24h, settings.ctrader_requests_per_minute),
     )
+
+
+def open_demo(settings, redis_client=None):
+    """Legacy function name: connects to configured read-only source, never submits orders."""
+    from services.ctrader.openapi import ReadOnlyOpenApi
+    return ReadOnlyOpenApi(**_session(settings, redis_client))
+
+
+def open_trading(settings, redis_client=None):
+    from services.ctrader.openapi import TradingOpenApi
+    if not getattr(settings, 'ctrader_broker_orders', False):
+        raise CTraderUnavailable('Broker orders disabled')
+    return TradingOpenApi(timeout=20, **_session(settings, redis_client))

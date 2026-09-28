@@ -70,7 +70,7 @@ def test_discord_routes_fail_closed_without_service_key(factory):
     with TestClient(create_app(settings(),factory,Cache())) as client:
         for path in ('status','positions','history','daily-report'):
             assert client.get('/internal/discord/'+path,headers=HEADERS).status_code == 401
-        for path in ('paper-order','paper-close','pause','resume'):
+        for path in ('paper-order','paper-close','broker-order','pause','resume'):
             assert client.post('/internal/discord/'+path,headers=HEADERS,json={}).status_code == 401
 
 def test_risk_above_point_25_and_missing_brackets_rejected(discord_client):
@@ -148,6 +148,23 @@ def test_pause_resume_only_changes_automatic_paper_control(discord_client,factor
 
 def test_execution_remains_false(discord_client):
     assert discord_client.get('/internal/discord/status',headers=HEADERS).json()['execution_enabled'] is False
+
+def test_broker_order_disabled_by_default(discord_client):
+    r=discord_client.post('/internal/discord/broker-order',headers=HEADERS,
+        json={'interaction_id':'b1','side':'buy','reason':'connectivity check'})
+    assert r.status_code==409
+
+def test_broker_order_uses_min_lot_when_enabled(factory, monkeypatch):
+    monkeypatch.setattr('services.ctrader.orders.place_min_market',
+        lambda *args, **kwargs: {'broker':True,'side':kwargs['side'],'volume':1000})
+    configured=settings(discord_api_key=API_KEY, ctrader_broker_orders=True)
+    with TestClient(create_app(configured,factory,Cache())) as client:
+        r=client.post('/internal/discord/broker-order',headers=HEADERS,
+            json={'interaction_id':'b2','side':'buy','reason':'connectivity check'})
+    assert r.status_code==200
+    assert r.json()['broker'] is True
+    assert r.json()['execution_enabled'] is False
+    assert r.json()['side']=='buy'
 
 def test_rate_limit_uses_redis_counter():
     class Counter:

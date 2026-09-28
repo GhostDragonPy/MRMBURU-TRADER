@@ -89,6 +89,10 @@ def test_transport_rejects_order_messages_before_network_use():
         transport.request(ProtoOANewOrderReq(
             ctidTraderAccountId=123, symbolId=1, orderType=1, tradeSide=1, volume=100,
         ))
+    with pytest.raises(CTraderUnavailable, match='Blocked non-read-only'):
+        transport._write(ProtoOANewOrderReq(
+            ctidTraderAccountId=123, symbolId=1, orderType=1, tradeSide=1, volume=100,
+        ), 'x')
 
 def test_missing_quote_timestamp_is_not_synthesized(monkeypatch):
     event = ProtoOASpotEvent(ctidTraderAccountId=123, symbolId=1, bid=110000, ask=110020)

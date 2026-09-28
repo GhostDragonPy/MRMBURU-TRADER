@@ -16,6 +16,7 @@ INTERNAL_PATHS = frozenset({
     '/internal/discord/status', '/internal/discord/positions',
     '/internal/discord/history', '/internal/discord/daily-report',
     '/internal/discord/paper-order', '/internal/discord/paper-close',
+    '/internal/discord/broker-order',
     '/internal/discord/pause', '/internal/discord/resume',
 })
 
@@ -45,7 +46,7 @@ settings = load_settings()
 cache = Redis.from_url(settings.redis_url, socket_connect_timeout=3, socket_timeout=3)
 lock = None
 
-def api(path, user_id, method='GET', payload=None):
+def api(path, user_id, method='GET', payload=None, timeout=10):
     if path not in INTERNAL_PATHS:
         raise RuntimeError('Internal path not allowed')
     data = json.dumps(payload).encode() if payload is not None else None
@@ -54,12 +55,12 @@ def api(path, user_id, method='GET', payload=None):
                  'x-discord-api-key':settings.api_key,
                  'x-discord-user-id':str(user_id)})
     try:
-        with urlopen(request, timeout=10) as response: return json.loads(response.read())
+        with urlopen(request, timeout=timeout) as response: return json.loads(response.read())
     except HTTPError as exc:
         raise RuntimeError(f'Internal API rejected request ({exc.code})') from None
 
-async def call(path, interaction, method='GET', payload=None):
-    return await asyncio.to_thread(api, path, interaction.user.id, method, payload)
+async def call(path, interaction, method='GET', payload=None, timeout=10):
+    return await asyncio.to_thread(api, path, interaction.user.id, method, payload, timeout)
 
 def authorize(interaction):
     roles = [role.id for role in getattr(interaction.user, 'roles', ())]
@@ -260,6 +261,22 @@ async def paper_order(interaction, side:app_commands.Choice[str], stop_loss:floa
         return await call('/internal/discord/paper-order',confirm_interaction,'POST',payload)
     summary=f'EURUSD {side.value.upper()} market | SL {stop_loss} | TP {take_profit} | riesgo {risk_percent}% | {reason}'
     await interaction.response.send_message(summary+'\n¿Confirmar simulación?',
+        view=Confirm(interaction.user.id,execute),ephemeral=True)
+
+@client.tree.command(name='broker_order',description='Enviar 1 volumen mínimo EURUSD a cTrader (verificación)')
+@app_commands.describe(side='buy o sell',reason='Motivo obligatorio')
+@app_commands.choices(side=[app_commands.Choice(name='Buy',value='buy'),app_commands.Choice(name='Sell',value='sell')])
+async def broker_order(interaction, side:app_commands.Choice[str], reason:str):
+    if not await guard(interaction): return
+    try:
+        reason = bounded(reason, minimum=3, maximum=MAX_REASON, field='motivo')
+    except ValueError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True); return
+    payload={'interaction_id':str(interaction.id),'side':side.value,'reason':reason}
+    async def execute(confirm_interaction):
+        return await call('/internal/discord/broker-order',confirm_interaction,'POST',payload,35)
+    await interaction.response.send_message(
+        f'ORDEN REAL cTrader EURUSD {side.value.upper()} volumen mínimo | {reason}\n¿Confirmar?',
         view=Confirm(interaction.user.id,execute),ephemeral=True)
 
 @client.tree.command(name='paper_close',description='Cerrar una posición manual simulada')

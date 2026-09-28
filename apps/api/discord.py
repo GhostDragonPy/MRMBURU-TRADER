@@ -17,6 +17,11 @@ class DiscordOrder(Contract):
     risk_percent: Decimal = Field(gt=0, le=Decimal('0.25'), allow_inf_nan=False)
     reason: str = Field(min_length=3, max_length=512)
 
+class DiscordBrokerOrder(Contract):
+    interaction_id: str = Field(min_length=1, max_length=32)
+    side: str = Field(pattern='^(buy|sell)$')
+    reason: str = Field(min_length=3, max_length=512)
+
 class DiscordClose(Contract):
     interaction_id: str = Field(min_length=1, max_length=32)
     position_id: str = Field(min_length=1, max_length=36)
@@ -86,6 +91,26 @@ def mount(app, *, settings, factory, redis_client, db):
                 risk_fraction=body.risk_percent/Decimal(100), reason=body.reason)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
+
+    @app.post('/internal/discord/broker-order')
+    def broker_order(body:DiscordBrokerOrder, user=Depends(authorized), session=Depends(db)):
+        from services.ctrader.orders import place_min_market
+        from services.ctrader.types import CTraderAuthRequired, CTraderUnavailable
+        def execute():
+            result = place_min_market(settings, redis_client, side=body.side)
+            result['reason'] = body.reason
+            result['user_id'] = user
+            return result
+        try:
+            return discord_sandbox.idempotent(session, interaction_id=body.interaction_id,
+                user_id=user, action='broker-order',
+                payload={'side':body.side,'reason':body.reason}, operation=execute)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        except CTraderAuthRequired as exc:
+            raise HTTPException(401, str(exc)) from None
+        except CTraderUnavailable as exc:
+            raise HTTPException(409, str(exc)) from None
 
     @app.post('/internal/discord/paper-close')
     def paper_close(body:DiscordClose, user=Depends(authorized), session=Depends(db)):

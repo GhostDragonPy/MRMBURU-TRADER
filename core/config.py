@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     ctrader_requests_per_minute: int = Field(default=60, ge=1, le=100)
     ctrader_requests_per_24h: int = Field(default=1000, ge=1, le=1000)
     ctrader_redirect_uri: str = 'https://trader.acshop.shop/research/ctrader/callback'
+    ctrader_broker_orders: bool = False
     discord_bot_enabled: bool = False
     discord_bot_token: Optional[SecretStr] = None
     discord_api_key: Optional[SecretStr] = None

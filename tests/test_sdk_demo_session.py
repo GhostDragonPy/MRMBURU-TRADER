@@ -1,10 +1,13 @@
+from collections import deque
 from unittest.mock import Mock
 import pytest
+from ctrader_open_api.messages.OpenApiCommonMessages_pb2 import ProtoMessage
 from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOAAccountAuthRes, ProtoOAApplicationAuthRes, ProtoOAExecutionEvent,
     ProtoOAGetAccountListByAccessTokenRes, ProtoOANewOrderReq, ProtoOAReconcileRes,
-    ProtoOASubscribeSpotsRes, ProtoOASymbolByIdRes, ProtoOASymbolsListRes,
-    ProtoOATraderRes, ProtoOAUnsubscribeSpotsRes,
+    ProtoOASpotEvent, ProtoOASubscribeSpotsReq, ProtoOASubscribeSpotsRes,
+    ProtoOASymbolByIdRes, ProtoOASymbolsListRes, ProtoOATraderRes,
+    ProtoOAUnsubscribeSpotsRes,
 )
 from ctrader_open_api.messages.OpenApiModelMessages_pb2 import (
     ProtoOAClientPermissionScope, ProtoOAExecutionType, ProtoOAPositionStatus,
@@ -13,7 +16,7 @@ from services.demo_orders.barrier import NEW_ORDER, TradingMessageBarrier
 from services.demo_orders.guards import DEMO_HOST, DemoGuardError
 from services.demo_orders.preflight import record_preflight
 from services.demo_orders.probe import evaluate as probe_evaluate
-from services.demo_orders.sdk_session import SdkDemoSession, SdkDemoSessionFactory
+from services.demo_orders.sdk_session import SdkDemoSession, SdkDemoSessionFactory, TlsProtobufDriver
 from services.demo_orders.factory import UnconfiguredDemoTransport, build_gateway
 from tests.test_demo_orders import NOW, FakeTransport, demo_settings, opened_event, run
 from tests.test_official_demo_transport import FakeDemoSession
@@ -287,3 +290,78 @@ def test_worker_passes_persistent_session(factory):
         from services.demo_orders.transport import OfficialDemoTransport
         assert isinstance(gw.transport, OfficialDemoTransport)
         assert gw.transport.session is sess
+
+
+def _envelope(payload, client_msg_id='x'):
+    return ProtoMessage(
+        payloadType=payload.payloadType,
+        payload=payload.SerializeToString(),
+        clientMsgId=client_msg_id,
+    )
+
+
+def _spot_envelope(symbol_id=1, client_msg_id=''):
+    spot = ProtoOASpotEvent(
+        ctidTraderAccountId=1001, symbolId=symbol_id, bid=110000, ask=110010,
+    )
+    return _envelope(spot, client_msg_id)
+
+
+def _install_framed_receive(driver, frames):
+    calls = {'n': 0}
+    queued = deque(frames)
+
+    def fake_receive(*, socket_only=False):
+        calls['n'] += 1
+        if calls['n'] > 40:
+            raise AssertionError('busy-loop recycling pending frames')
+        if not socket_only and driver._pending:
+            return driver._pending.popleft()
+        if queued:
+            return queued.popleft()
+        raise TimeoutError('no more frames')
+
+    driver.receive = fake_receive
+    driver.send = lambda *a, **k: None
+    return calls
+
+
+def test_request_does_not_spin_when_spot_arrives_before_ack():
+    driver = TlsProtobufDriver(timeout=2)
+    req = ProtoOASubscribeSpotsReq()
+    ack = ProtoOASubscribeSpotsRes(ctidTraderAccountId=1001)
+    expected_id = 'mrmburu-subscribe'
+    calls = _install_framed_receive(driver, [
+        _spot_envelope(),
+        _envelope(ack, expected_id),
+    ])
+    result = driver.request(req, expected_id, 2.0)
+    assert isinstance(result, ProtoOASubscribeSpotsRes)
+    assert len(driver._pending) == 1
+    assert driver._pending[0].payloadType == ProtoOASpotEvent().payloadType
+    assert calls['n'] == 2
+
+
+def test_wait_payload_does_not_spin_on_unmatched_pending():
+    driver = TlsProtobufDriver(timeout=2)
+    unmatched = _envelope(ProtoOAReconcileRes(ctidTraderAccountId=1001), 'stale')
+    driver._pending.append(unmatched)
+    calls = _install_framed_receive(driver, [_spot_envelope()])
+    found = driver.wait_payload(
+        ProtoOASpotEvent().payloadType, 2.0,
+        lambda row: row.symbolId == 1 and row.HasField('bid') and row.HasField('ask'),
+    )
+    assert found.symbolId == 1
+    assert found.bid == 110000
+    assert list(driver._pending) == [unmatched]
+    assert calls['n'] == 1
+
+
+def test_wait_payload_consumes_matching_pending_without_socket():
+    driver = TlsProtobufDriver(timeout=2)
+    driver._pending.append(_spot_envelope())
+    calls = _install_framed_receive(driver, [])
+    found = driver.wait_payload(ProtoOASpotEvent().payloadType, 2.0)
+    assert found.symbolId == 1
+    assert calls['n'] == 0
+    assert not driver._pending

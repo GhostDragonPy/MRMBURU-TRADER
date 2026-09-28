@@ -138,8 +138,8 @@ class TlsProtobufDriver:
             chunks.extend(chunk)
         return bytes(chunks)
 
-    def receive(self) -> ProtoMessage:
-        if self._pending:
+    def receive(self, *, socket_only=False) -> ProtoMessage:
+        if not socket_only and self._pending:
             return self._pending.popleft()
         try:
             size = struct.unpack('!I', self._read_exactly(4))[0]
@@ -166,7 +166,7 @@ class TlsProtobufDriver:
         self._deadline = monotonic() + timeout
         self.send(payload, client_msg_id)
         while True:
-            envelope = self.receive()
+            envelope = self.receive(socket_only=True)
             if envelope.payloadType == ProtoHeartbeatEvent().payloadType:
                 continue
             if envelope.clientMsgId != client_msg_id:
@@ -184,7 +184,7 @@ class TlsProtobufDriver:
         self.send(payload, client_msg_id)
         try:
             while True:
-                envelope = self.receive()
+                envelope = self.receive(socket_only=True)
                 if envelope.payloadType == ProtoHeartbeatEvent().payloadType:
                     continue
                 if envelope.clientMsgId and envelope.clientMsgId != client_msg_id:
@@ -207,8 +207,21 @@ class TlsProtobufDriver:
 
     def wait_payload(self, payload_type: int, timeout: float, predicate=None):
         self._deadline = monotonic() + timeout
+        kept = deque()
+        while self._pending:
+            envelope = self._pending.popleft()
+            if envelope.payloadType == ProtoHeartbeatEvent().payloadType:
+                continue
+            if envelope.payloadType == payload_type:
+                message = _message_class(payload_type)()
+                message.ParseFromString(envelope.payload)
+                if predicate is None or predicate(message):
+                    self._pending.extendleft(reversed(kept))
+                    return message
+            kept.append(envelope)
+        self._pending.extend(kept)
         while True:
-            envelope = self.receive()
+            envelope = self.receive(socket_only=True)
             if envelope.payloadType == ProtoHeartbeatEvent().payloadType:
                 continue
             if envelope.payloadType != payload_type:

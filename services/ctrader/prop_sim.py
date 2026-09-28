@@ -139,7 +139,7 @@ def broker_account_list(settings, token, host, redis_client=None):
     if not getattr(settings, 'ctrader_network_enabled', False):
         raise CTraderUnavailable('cTrader network disabled')
     from ctrader_open_api.messages.OpenApiMessages_pb2 import (
-        ProtoOAGetAccountListByAccessTokenReq, ProtoOATraderReq,
+        ProtoOAGetAccountListByAccessTokenReq,
     )
     from services.ctrader.openapi import ReadOnlyOpenApi
     from services.ctrader.budget import RequestBudget
@@ -155,22 +155,23 @@ def broker_account_list(settings, token, host, redis_client=None):
         account_id=target,
         budget=budget,
         environment='live',
+        authenticate_account=False,
+        timeout=20,
     )
     with session:
         listed = session.request(ProtoOAGetAccountListByAccessTokenReq(accessToken=token))
-        trader = session.request(ProtoOATraderReq(ctidTraderAccountId=target)).trader
     accounts = [
         {
             'ctidTraderAccountId': int(row.ctidTraderAccountId),
             'isLive': bool(row.isLive),
-            'broker': getattr(trader, 'brokerName', '') if int(row.ctidTraderAccountId) == target else '',
+            'broker': '',
         }
         for row in listed.ctidTraderAccount
     ]
     return {
         'permission_scope': getattr(listed, 'permissionScope', None),
         'accounts': accounts,
-        'broker': getattr(trader, 'brokerName', '') or 'unknown',
+        'broker': 'unknown',
     }
 
 

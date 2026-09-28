@@ -40,7 +40,8 @@ class ReadOnlyOpenApi(AbstractContextManager):
     """Authenticated connection limited to an explicit read-only allowlist."""
 
     def __init__(self, *, client_id: str, client_secret: str, access_token: str,
-                 account_id: int, timeout: float = 10, budget=None, environment='demo'):
+                 account_id: int, timeout: float = 10, budget=None, environment='demo',
+                 authenticate_account: bool = True):
         self.client_id = client_id
         self.client_secret = client_secret
         self.access_token = access_token
@@ -53,6 +54,7 @@ class ReadOnlyOpenApi(AbstractContextManager):
         self._budget = budget
         self._first_write_reserved = False
         self.allowed_writes = set(ALLOWED_WRITES)
+        self.authenticate_account = bool(authenticate_account)
         if environment not in ('demo', 'live'):
             raise ValueError('Invalid broker environment')
         self.environment = environment
@@ -74,6 +76,8 @@ class ReadOnlyOpenApi(AbstractContextManager):
                 clientId=self.client_id, clientSecret=self.client_secret,
             ))
             accounts = self.request(ProtoOAGetAccountListByAccessTokenReq(accessToken=self.access_token))
+            if not self.authenticate_account:
+                return self
             match = next((a for a in accounts.ctidTraderAccount if a.ctidTraderAccountId == self.account_id), None)
             if match is None or match.isLive != (self.environment == 'live'):
                 raise CTraderUnavailable('Account absent or incompatible with broker environment')

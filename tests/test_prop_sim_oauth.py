@@ -343,3 +343,32 @@ def test_active_txn_correlates_without_cookie_or_state(factory, monkeypatch):
         assert b'scope: TRADE' in r.content
     assert token_store.load_access_token(cache) == 'md'
     assert token_store.load_prop_sim_access_token(cache) == 'prop-sim-token'
+
+
+def test_prop_sim_account_list_uses_redis(factory, monkeypatch):
+    import apps.api.main as api_main
+    cache = Cache()
+    cfg = prop_settings()
+    token_store.save_market_data_tokens(cache, {'access_token': 'md', 'expires_in': 3600})
+    captured = {}
+    monkeypatch.setattr(api_main, 'PROP_SIM_LIST_ACCOUNTS', None)
+    def fake_broker(settings, token, host, redis_client=None):
+        captured['redis'] = redis_client is not None
+        captured['host'] = host
+        return listed_ok()
+    monkeypatch.setattr('services.ctrader.prop_sim.broker_account_list', fake_broker)
+    def fake_exchange(settings, code, redirect_uri=None):
+        return {'access_token': 'prop-sim-token', 'refresh_token': 'r', 'expires_in': 3600}
+    monkeypatch.setattr(api_main.ctrader, 'exchange_code', fake_exchange)
+    from tests.test_api import RESEARCH
+    with TestClient(create_app(cfg, factory, cache), base_url='https://trader.acshop.shop') as client:
+        issued = client.get('/market/ctrader/authorize-prop-sim', headers={'x-api-key': RESEARCH}).json()
+        client.get('/research/ctrader/prop-sim/start', params={'tx': issued['start_url'].split('tx=')[-1]},
+                   follow_redirects=False)
+        r = client.get('/research/ctrader/prop-sim/callback', params={'code': 'from-broker'})
+        assert r.status_code == 200, r.text
+        assert b'purpose: prop-sim' in r.content
+    assert captured.get('redis') is True
+    assert captured.get('host') == 'live.ctraderapi.com'
+    assert token_store.load_access_token(cache) == 'md'
+    assert token_store.load_prop_sim_access_token(cache) == 'prop-sim-token'

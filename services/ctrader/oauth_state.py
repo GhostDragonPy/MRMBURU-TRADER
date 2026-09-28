@@ -15,7 +15,16 @@ ALLOWED_PURPOSES = frozenset({'market-data', 'prop-sim'})
 
 
 def _signer(settings):
-    return settings.admin_api_key.get_secret_value().encode()
+    secret = getattr(settings, 'ctrader_oauth_state_secret', None)
+    if secret is None or not secret.get_secret_value():
+        raise CTraderAuthRequired('CTRADER_OAUTH_STATE_SECRET is not set')
+    value = secret.get_secret_value()
+    admin = settings.admin_api_key.get_secret_value()
+    if value == admin:
+        raise CTraderAuthRequired('OAuth state secret must not reuse ADMIN_API_KEY')
+    if len(value.encode()) < 32:
+        raise CTraderAuthRequired('CTRADER_OAUTH_STATE_SECRET must be at least 32 bytes')
+    return value.encode()
 
 
 def issue(settings, redis_client, *, purpose, expected_account, scope='trading', ttl=600):

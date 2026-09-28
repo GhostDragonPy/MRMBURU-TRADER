@@ -15,6 +15,7 @@ def prop_settings(**kw):
         prop_sim_allowed_account_ids='17204978',
         prop_sim_execution_enabled=False,
         prop_sim_acknowledged_live_environment=False,
+        ctrader_oauth_state_secret='x'*32,
     )
     values.update(kw)
     return settings(**values)

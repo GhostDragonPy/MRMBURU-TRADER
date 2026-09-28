@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     prop_sim_execution_enabled: Literal[False] = False
     prop_sim_allowed_account_ids: str = '17204978'
     prop_sim_acknowledged_live_environment: bool = False
+    ctrader_oauth_state_secret: Optional[SecretStr] = None
     discord_bot_enabled: bool = False
     discord_bot_token: Optional[SecretStr] = None
     discord_api_key: Optional[SecretStr] = None
@@ -62,7 +63,7 @@ class Settings(BaseSettings):
             return False
         return value
 
-    @field_validator('deepseek_api_key', 'fred_api_key', 'ctrader_client_id', 'ctrader_client_secret', 'ctrader_access_token', 'discord_bot_token', 'discord_api_key', mode='before')
+    @field_validator('deepseek_api_key', 'fred_api_key', 'ctrader_client_id', 'ctrader_client_secret', 'ctrader_access_token', 'ctrader_oauth_state_secret', 'discord_bot_token', 'discord_api_key', mode='before')
     @classmethod
     def empty_secret_is_none(cls, value):
         if value is None or (isinstance(value, str) and not value.strip()):
@@ -96,6 +97,13 @@ class Settings(BaseSettings):
             raise ValueError('48803059 cannot be allowlisted for prop-sim')
         if prop_id and allowed and prop_id not in allowed:
             raise ValueError('PROP_SIM_CTRADER_ACCOUNT_ID must be in PROP_SIM_ALLOWED_ACCOUNT_IDS')
+        oauth_secret = self.ctrader_oauth_state_secret
+        if oauth_secret:
+            oauth_value = oauth_secret.get_secret_value()
+            if oauth_value in keys:
+                raise ValueError('CTRADER_OAUTH_STATE_SECRET must be distinct')
+            if len(oauth_value.encode()) < 32:
+                raise ValueError('CTRADER_OAUTH_STATE_SECRET must be at least 32 bytes')
         return self
 
     @property

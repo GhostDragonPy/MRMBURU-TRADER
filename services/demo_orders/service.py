@@ -321,18 +321,30 @@ def status_payload(session, settings, token_scope, *, redis_client=None):
     paused = session.get(AutomaticPaperControl, 1)
     ny_now = datetime.now(timezone.utc)
     transport = 'unconfigured'
-    if settings.trading_mode == 'demo-orders' and settings.demo_execution_enabled and demo.rollout in ('canary', 'enabled'):
-        try:
-            require_preflight(session, settings, now=ny_now)
-            transport = 'official-demo'
-        except DemoGuardError:
-            transport = 'unconfigured'
+    if settings.trading_mode == 'demo-orders' and demo.rollout in ('shadow', 'canary', 'enabled'):
+        transport = 'sdk-demo'
+    connection = {'state': 'idle', 'host': 'demo.ctraderapi.com', 'auth': False}
+    if redis_client is not None:
+        raw = redis_client.get('demo:socket')
+        if raw:
+            import json as json_lib
+            try:
+                payload = json_lib.loads(raw.decode() if isinstance(raw, bytes) else raw)
+                connection = {
+                    'state': 'healthy' if payload.get('healthy') else 'down',
+                    'host': payload.get('host'),
+                    'app_auth': payload.get('app_auth'),
+                    'account_auth': payload.get('account_auth'),
+                    'trading_permission': payload.get('trading_permission'),
+                }
+            except Exception:
+                connection = {'state': 'invalid'}
     return {
         'trading_mode': settings.trading_mode,
         'rollout': demo.rollout,
         'transport': transport,
         'preflight': public_preflight(session, settings),
-        'connection': 'idle',
+        'connection': connection,
         'blocked': demo.blocked,
         'protection_failed': demo.protection_failed,
         'emergency_stop': demo.blocked,

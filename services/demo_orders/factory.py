@@ -1,7 +1,6 @@
 """Wire OfficialDemoTransport only when every DEMO gate is already true."""
 from services.demo_orders.gateway import DemoCTraderExecutionGateway
 from services.demo_orders.guards import DEMO_HOST, LIVE_ACCOUNT_IDS, DemoGuardError, validate_settings
-from services.demo_orders.preflight import require_preflight
 from services.demo_orders.transport import OfficialDemoTransport
 
 
@@ -47,7 +46,8 @@ def official_conditions(settings, *, rollout, token_scope, db_session):
     if db_session is None:
         return False
     try:
-        require_preflight(db_session, settings)
+        from services.demo_orders.preflight import require_verified_preflight
+        require_verified_preflight(db_session, settings)
     except DemoGuardError:
         return False
     return True
@@ -76,3 +76,19 @@ def build_gateway(settings, redis_client=None, *, db_session=None, token_scope='
                                       token_scope=token_scope, budget=budget)
     transport.name = 'official-demo'
     return DemoCTraderExecutionGateway(transport)
+
+
+def open_shadow_session(settings, redis_client=None, *, demo=None, driver=None, budget=None):
+    """Persistent DEMO socket for shadow/canary/enabled. Orders still require the barrier."""
+    from services.ctrader.budget import RequestBudget
+    from services.demo_orders.barrier import TradingMessageBarrier
+    from services.demo_orders.sdk_session import SdkDemoSessionFactory
+    if settings.trading_mode != 'demo-orders':
+        return None
+    barrier = TradingMessageBarrier.for_rollout(
+        settings, demo, redis_client=redis_client, trading_permission='UNVERIFIED')
+    if budget is None and redis_client is not None:
+        budget = RequestBudget(redis_client, settings.demo_ctrader_account_id,
+                               settings.ctrader_requests_per_24h, settings.ctrader_requests_per_minute)
+    return SdkDemoSessionFactory().open(
+        settings, barrier=barrier, budget=budget, driver=driver, redis_client=redis_client)

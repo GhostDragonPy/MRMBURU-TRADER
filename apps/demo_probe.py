@@ -1,30 +1,37 @@
 """Read-only DEMO probe: python -m apps.demo_probe
 
-Does not send orders. Requires an injected session in tests.
-Network sockets stay off unless CTRADER_NETWORK_ENABLED=true and this module
-is run as a human operator command; tests never take that path.
+Opens a real SDK DEMO socket when no session is injected. Never sends orders.
 """
 import json
 import sys
+from services.ctrader.types import CTraderAuthRequired, CTraderUnavailable
 from services.demo_orders.guards import DemoGuardError
 from services.demo_orders.probe import evaluate
 from services.demo_orders.transport import sanitize
 
 
-def main(argv=None, *, settings=None, session=None, persist=None):
+def main(argv=None, *, settings=None, session=None, persist=None, redis_client=None, driver=None):
     argv = list(sys.argv[1:] if argv is None else argv)
-    if session is None:
-        print('FAIL')
-        print(json.dumps({'result': 'FAIL', 'reason': 'probe_session_required_until_activation'}, indent=2))
-        return 1
-    from core.config import get_settings
-    cfg = settings or get_settings()
+    owned = False
+    cfg = settings
     try:
+        if cfg is None:
+            from core.config import get_settings
+            cfg = get_settings()
+        if session is None:
+            from services.demo_orders.sdk_session import SdkDemoSessionFactory
+            session = SdkDemoSessionFactory().open_probe(cfg, redis_client, driver=driver)
+            owned = True
         report = evaluate(cfg, session, persist=persist)
-    except DemoGuardError as exc:
+    except (DemoGuardError, CTraderAuthRequired, CTraderUnavailable) as exc:
         print('FAIL')
-        print(json.dumps({'result': 'FAIL', 'reason': str(exc)}, indent=2))
+        print(json.dumps({'result': 'FAIL', 'reason': sanitize(str(exc))}, indent=2))
         return 1
+    finally:
+        if owned and session is not None:
+            closer = getattr(session, 'close', None)
+            if closer:
+                closer()
     print(report['result'])
     print(json.dumps(sanitize(report), indent=2))
     return 0 if report['result'] == 'PASS' else 1

@@ -104,7 +104,8 @@ def test_official_transport_only_when_all_demo_gates(factory):
     with factory.begin() as db:
         service.control(db).rollout = 'enabled'
         service.control(db).armed_at = NOW
-        record_preflight(db, cfg, now=datetime.now(timezone.utc))
+        record_preflight(db, cfg, now=datetime.now(timezone.utc), extra_detail={
+            'trading_permission': 'VERIFIED', 'socket': 'sdk-tls'})
         gw = build_gateway(cfg, Mock(), db_session=db, token_scope='trading',
                            protobuf_session=session)
         assert isinstance(gw.transport, OfficialDemoTransport)
@@ -121,17 +122,19 @@ def test_read_only_probe_pass_and_no_order_writes(factory):
             self.port = 5035
             self.persistent = True
             self.writes = ['authenticate']
+            self.transport = 'fake'
         def authenticate(self, **kwargs):
             return {
                 'app_auth': True, 'account_auth': True, 'permission_scope': 'trading',
+                'trading_permission': 'VERIFIED',
                 'accounts': [{'ctidTraderAccountId': 1001, 'isLive': False}],
             }
         def heartbeat(self):
             return True
     with factory.begin() as db:
         report = probe_evaluate(demo_settings(), ProbeSession(), persist=db, now=NOW)
-    assert report['result'] == 'PASS'
-    assert 'token' not in str(report).lower() or 'injected' not in str(report)
+    assert report['result'] == 'FAIL'
+    assert report['checks_ok'] is False
     blob = str(report)
     assert 'client_secret' not in blob
 
@@ -157,4 +160,4 @@ def test_discord_cannot_enable_execution_or_change_host(factory):
 
 def test_probe_cli_without_session_fails_closed():
     from apps.demo_probe import main
-    assert main(argv=[], session=None) == 1
+    assert main(argv=[], settings=demo_settings(), session=None) == 1

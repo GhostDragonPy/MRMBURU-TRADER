@@ -11,9 +11,10 @@ from core.config import get_settings
 from core.database import session_factory
 
 
-def paper_loop(settings, factory, cache, stop):
+def paper_loop(settings, factory, cache, stop, demo_sdk=None):
     from services.ctrader.feed import feed_from_settings
     from services.pipeline.simulator import cycle
+    demo_sdk = demo_sdk if demo_sdk is not None else {'session': None}
     while not stop.is_set():
         try:
             if getattr(settings, 'paper_strategy', 'sma') == 'esses-v1':
@@ -33,15 +34,27 @@ def paper_loop(settings, factory, cache, stop):
                         allow_unknown_news=settings.paper_allow_unknown_news)
                     if settings.trading_mode == 'demo-orders':
                         from services.ctrader import tokens as token_store
-                        from services.demo_orders.factory import build_gateway
-                        from services.demo_orders.service import on_paper_cycle
+                        from services.demo_orders.factory import build_gateway, open_shadow_session
+                        from services.demo_orders.service import control, on_paper_cycle
+                        import json as json_lib
                         scope = token_store.effective_scope(cache) or 'accounts'
+                        demo = control(session)
+                        if demo.rollout in ('shadow', 'canary', 'enabled'):
+                            sess = demo_sdk.get('session')
+                            if sess is None or not getattr(sess, 'healthy', False):
+                                try:
+                                    sess = open_shadow_session(settings, cache, demo=demo)
+                                    demo_sdk['session'] = sess
+                                except Exception as exc:
+                                    logging.error('DEMO socket unavailable: %s', type(exc).__name__)
+                                    sess = None
+                            if sess is not None:
+                                cache.set('demo:socket', json_lib.dumps(sess.snapshot_status()))
+                                if sess.trading_permission == 'VERIFIED':
+                                    cache.set('demo:preflight:ok', '1', ex=3600)
                         gw = build_gateway(settings, cache, db_session=session, token_scope=scope)
                         on_paper_cycle(session, settings, result, now=datetime.now(timezone.utc),
                             gateway=gw, token_scope=scope, redis_client=cache)
-                        closer = getattr(gw.transport, 'close', None)
-                        if closer:
-                            closer()
                 else:
                     result = cycle(session, feed_from_settings(settings, cache),
                         settings.paper_account_id,
@@ -68,12 +81,13 @@ def main():
     signal.signal(signal.SIGINT,lambda *_:stop.set())
     task = None
     collector = None
+    demo_sdk = {'session': None}
     if settings.ctrader_network_enabled and settings.ctrader_cached_feed:
         from services.ctrader.stream import collector_loop
         collector = Thread(target=collector_loop, args=(settings, cache, stop), daemon=True)
         collector.start()
     if settings.paper_scheduler_enabled:
-        task = Thread(target=paper_loop, args=(settings, factory, cache, stop), daemon=True)
+        task = Thread(target=paper_loop, args=(settings, factory, cache, stop, demo_sdk), daemon=True)
         task.start()
     while not stop.is_set():
         try:
@@ -86,6 +100,9 @@ def main():
         task.join(timeout=5)
     if collector:
         collector.join(timeout=10)
+    closer = getattr(demo_sdk.get('session'), 'close', None)
+    if closer:
+        closer()
     cache.close()
 
 if __name__=='__main__':main()

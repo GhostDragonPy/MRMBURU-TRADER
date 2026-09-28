@@ -3,8 +3,10 @@ from services.demo_orders.guards import DEMO_HOST, LIVE_ACCOUNT_IDS, LIVE_HOST, 
 from services.demo_orders.preflight import PROTOBUF_PORT, fingerprint, mask_account, record_preflight
 from services.demo_orders.transport import sanitize
 
-FORBIDDEN = frozenset({'new_order', 'close_position', 'amend_sl_tp', 'ProtoOANewOrderReq',
-                       'ProtoOAClosePositionReq', 'ProtoOAAmendPositionSLTPReq'})
+FORBIDDEN = frozenset({
+    'ProtoOANewOrderReq', 'ProtoOAClosePositionReq', 'ProtoOAAmendPositionSLTPReq',
+    'new_order', 'close_position', 'amend_sl_tp',
+})
 
 
 def evaluate(settings, session, *, persist=None, now=None, ttl_seconds=86400):
@@ -22,8 +24,11 @@ def evaluate(settings, session, *, persist=None, now=None, ttl_seconds=86400):
         access_token='[injected]', account_id=settings.demo_ctrader_account_id,
         scope='trading')
     add('application_auth', listed.get('app_auth', True) is True)
-    add('token_scope_trading', listed.get('permission_scope') == 'trading',
-        listed.get('permission_scope'))
+    permission = listed.get('trading_permission') or (
+        'VERIFIED' if listed.get('permission_scope') == 'trading' else 'UNVERIFIED')
+    add('permission_metadata', True, listed.get('permission_metadata')
+        or 'ProtoOAGetAccountListByAccessTokenRes.permissionScope')
+    add('trading_permission_verified', permission == 'VERIFIED', permission)
     accounts = listed.get('accounts') or []
     add('account_list', bool(accounts), str(len(accounts)))
     account = str(settings.demo_ctrader_account_id or '')
@@ -43,21 +48,33 @@ def evaluate(settings, session, *, persist=None, now=None, ttl_seconds=86400):
     later = list(getattr(session, 'writes', []) or [])
     extra = [item for item in later if item not in writes]
     add('zero_order_messages', not any(str(item) in FORBIDDEN for item in extra), '')
+    real_socket = getattr(session, 'transport', '') == 'sdk-tls'
+    add('sdk_tls', real_socket, getattr(session, 'transport', 'fake'))
     ok = all(item['result'] == 'PASS' for item in checks)
+    persist_pass = ok and real_socket and permission == 'VERIFIED'
     if persist is not None:
         try:
-            record_preflight(persist, settings, now=now, is_live=False, host=DEMO_HOST,
-                             status='passed' if ok else 'failed', ttl_seconds=ttl_seconds)
+            record_preflight(
+                persist, settings, now=now, is_live=False, host=DEMO_HOST,
+                status='passed' if persist_pass else 'failed', ttl_seconds=ttl_seconds,
+                extra_detail={
+                    'trading_permission': permission,
+                    'socket': 'sdk-tls' if real_socket else 'fake',
+                    'permission_metadata': 'ProtoOAGetAccountListByAccessTokenRes.permissionScope',
+                })
         except DemoGuardError as exc:
             add('persist', False, str(exc))
             ok = False
+            persist_pass = False
     return {
-        'result': 'PASS' if ok else 'FAIL',
+        'result': 'PASS' if persist_pass else 'FAIL',
+        'checks_ok': ok,
         'host': DEMO_HOST,
         'port': PROTOBUF_PORT,
         'account': mask_account(account),
         'is_live': False,
         'symbol': 'EURUSD',
+        'trading_permission': permission,
         'fingerprint': fingerprint(account_id=account, host=DEMO_HOST, environment='demo'),
         'checks': checks,
     }

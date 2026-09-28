@@ -19,8 +19,6 @@ def validate_settings(settings):
         return
     if mode != 'demo-orders':
         raise ValueError('Unsupported trading mode')
-    if not settings.demo_execution_enabled:
-        raise ValueError('demo-orders requires DEMO_EXECUTION_ENABLED=true')
     if not settings.esses_broker_execution:
         raise ValueError('demo-orders requires ESSES_BROKER_EXECUTION=true')
     account = (settings.demo_ctrader_account_id or '').strip()

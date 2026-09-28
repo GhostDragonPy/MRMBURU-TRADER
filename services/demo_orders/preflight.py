@@ -31,7 +31,7 @@ def expected_fingerprint(settings):
 
 
 def record_preflight(session, settings, *, now=None, is_live=False, host=DEMO_HOST,
-                     symbol='EURUSD', status='passed', ttl_seconds=86400):
+                     symbol='EURUSD', status='passed', ttl_seconds=86400, extra_detail=None):
     now = now or datetime.now(timezone.utc)
     account = (settings.demo_ctrader_account_id or '').strip()
     if not account:
@@ -40,12 +40,15 @@ def record_preflight(session, settings, *, now=None, is_live=False, host=DEMO_HO
         raise DemoGuardError('LIVE account rejected')
     if host != DEMO_HOST:
         raise DemoGuardError('LIVE endpoint rejected')
+    detail = {'port': PROTOBUF_PORT, 'environment': 'demo'}
+    if extra_detail:
+        detail.update(extra_detail)
     row = session.get(DemoPreflight, PREFLIGHT_ID)
     payload = dict(
         account_id=account, is_live=False, host=DEMO_HOST, symbol=symbol,
         status=status, fingerprint=expected_fingerprint(settings),
         checked_at=now, expires_at=now + timedelta(seconds=int(ttl_seconds)),
-        detail={'port': PROTOBUF_PORT, 'environment': 'demo'},
+        detail=detail,
     )
     if row is None:
         session.add(DemoPreflight(id=PREFLIGHT_ID, **payload))
@@ -81,6 +84,16 @@ def require_preflight(session, settings, *, now=None):
     return row
 
 
+def require_verified_preflight(session, settings, *, now=None):
+    row = require_preflight(session, settings, now=now)
+    detail = row.detail or {}
+    if detail.get('trading_permission') != 'VERIFIED':
+        raise DemoGuardError('TRADING_PERMISSION_UNVERIFIED')
+    if detail.get('socket') != 'sdk-tls':
+        raise DemoGuardError('PREFLIGHT_SOCKET_UNVERIFIED')
+    return row
+
+
 def public_preflight(session, settings):
     row = current_preflight(session)
     if row is None:
@@ -94,4 +107,6 @@ def public_preflight(session, settings):
         'checked_at': row.checked_at.isoformat() if row.checked_at else None,
         'expires_at': row.expires_at.isoformat() if row.expires_at else None,
         'fingerprint': row.fingerprint,
+        'trading_permission': (row.detail or {}).get('trading_permission'),
+        'socket': (row.detail or {}).get('socket'),
     }

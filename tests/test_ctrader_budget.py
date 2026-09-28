@@ -28,7 +28,7 @@ def test_denied_or_invalid_budget_blocks_write(result):
     t = transport(RequestBudget(cache, 1, 500, 20))
     t._socket = Mock()
     with pytest.raises(CTraderUnavailable):
-        t._write(ProtoHeartbeatEvent(), 'h')
+        t._write(ProtoOAApplicationAuthReq(clientId='id', clientSecret='secret'), 'a')
     t._socket.sendall.assert_not_called()
 
 
@@ -43,14 +43,15 @@ def test_redis_outage_blocks_connection_attempt(monkeypatch):
     connect.assert_not_called()
 
 
-def test_authentication_and_heartbeat_each_consume_budget():
+def test_heartbeats_do_not_consume_budget():
     budget = Mock()
     t = transport(budget)
     t._socket = Mock()
     t._write(ProtoOAApplicationAuthReq(clientId='id', clientSecret='secret'), 'a')
     t._write(ProtoHeartbeatEvent(), 'h')
-    assert budget.reserve.call_count == 2
-    assert t._socket.sendall.call_count == 2
+    t._write(ProtoHeartbeatEvent(), 'h2')
+    assert budget.reserve.call_count == 1
+    assert t._socket.sendall.call_count == 3
 
 
 def test_preconnection_reservation_is_consumed_once():
@@ -59,7 +60,8 @@ def test_preconnection_reservation_is_consumed_once():
     t._socket = Mock()
     t._first_write_reserved = True
     t._write(ProtoHeartbeatEvent(), 'h1')
-    t._write(ProtoHeartbeatEvent(), 'h2')
+    t._write(ProtoOAApplicationAuthReq(clientId='id', clientSecret='secret'), 'a')
+    t._write(ProtoOAApplicationAuthReq(clientId='id', clientSecret='secret'), 'b')
     assert budget.reserve.call_count == 1
 
 

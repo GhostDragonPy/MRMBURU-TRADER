@@ -111,10 +111,13 @@ class ReadOnlyOpenApi(AbstractContextManager):
             self._write(ProtoHeartbeatEvent(), 'bootstrap-heartbeat')
         if self._budget is None:
             raise CTraderUnavailable('cTrader transport requires a request budget')
-        if self._first_write_reserved:
-            self._first_write_reserved = False
-        else:
-            self._budget.reserve()
+        # Heartbeats keep the TLS session alive; they must not burn the daily budget
+        # or a persistent collector dies after ~2.5h and Esses has no bars.
+        if payload.payloadType != ProtoHeartbeatEvent().payloadType:
+            if self._first_write_reserved:
+                self._first_write_reserved = False
+            else:
+                self._budget.reserve()
         envelope = ProtoMessage(
             payloadType=payload.payloadType,
             payload=payload.SerializeToString(),

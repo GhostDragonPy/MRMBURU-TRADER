@@ -155,6 +155,13 @@ def store_event(event, cache, key, books, quotes, now):
             cache.set(key+':tick', tick.model_dump_json(), ex=35)
 
 
+def _cached_bars(cache, key, tf):
+    raw = cache.get(key + ':bars:' + tf)
+    if not raw:
+        return []
+    return [OhlcBar.model_validate(row) for row in json.loads(raw)]
+
+
 def collect_session(settings, cache, stop, lock):
     if settings.ctrader_environment not in ('demo', 'live'):
         raise CTraderUnavailable('Esses collector requires a verified read-only source account')
@@ -167,14 +174,23 @@ def collect_session(settings, cache, stop, lock):
         cache.set(key+':instrument', meta.model_dump_json(), ex=604800)
         books = {tf: [] for tf in FRAMES}
         for tf in FRAMES:
-            books[tf] = feed.ohlc('EURUSD', tf, 40)
-            cache.set(key+':bars:'+tf, json.dumps([b.model_dump(mode='json') for b in books[tf]]), ex=604800)
+            try:
+                books[tf] = feed.ohlc('EURUSD', tf, 40)
+                cache.set(key+':bars:'+tf, json.dumps([b.model_dump(mode='json') for b in books[tf]]), ex=604800)
+            except CTraderUnavailable:
+                books[tf] = _cached_bars(cache, key, tf)
+                if not books[tf]:
+                    raise
+            if stop.wait(0.8):
+                return
         connection.request(ProtoOASubscribeSpotsReq(ctidTraderAccountId=feed.account_id,
             symbolId=[light.symbolId], subscribeToSpotTimestamp=True))
         for tf in FRAMES:
             connection._write(ProtoOASubscribeLiveTrendbarReq(ctidTraderAccountId=feed.account_id,
                 symbolId=light.symbolId, period=ProtoOATrendbarPeriod.Value(tf)), 'tb-'+tf+'-'+uuid4().hex[:8])
             connection.wait_for(ProtoOASubscribeLiveTrendbarRes)
+            if stop.wait(0.4):
+                return
         cache.set(key+':status', 'connected', ex=30)
         quotes = {}
         beat = 0

@@ -16,7 +16,8 @@ def test_collector_bootstraps_all_esses_frames():
     assert FRAMES == ('M1', 'M5', 'M15', 'H1', 'H4', 'D1')
     source = inspect.getsource(collect_session)
     assert 'for tf in FRAMES' in source
-    assert "for tf in ('M1', 'M15')" not in source
+    assert '_cached_bars' in source
+    assert 'stop.wait(0.8)' in source
     cache=Mock(); quotes={}; books={tf:[] for tf in FRAMES}
     event=ProtoOASpotEvent(ctidTraderAccountId=1,symbolId=1,bid=110000,timestamp=int(NOW.timestamp()*1000))
     store_event(event,cache,'x',books,quotes,NOW)

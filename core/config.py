@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     discord_api_key: Optional[SecretStr] = None
     discord_guild_id: Optional[int] = None
     discord_admin_role_id: Optional[int] = None
+    discord_channel_id: Optional[int] = None
     discord_allowed_user_ids: str = ''
     discord_api_url: str = 'http://api:8000'
     discord_rate_limit_per_minute: int = Field(default=10, ge=1, le=60)
@@ -70,7 +71,8 @@ class Settings(BaseSettings):
                 raise ValueError('DISCORD_API_KEY must be distinct and at least 32 characters')
         if self.discord_bot_enabled:
             if not all((self.discord_bot_token, self.discord_api_key, self.discord_guild_id,
-                        self.discord_admin_role_id, self.discord_allowed_user_ids.strip())):
+                        self.discord_admin_role_id, self.discord_channel_id,
+                        self.discord_allowed_user_ids.strip())):
                 raise ValueError('Discord bot configuration is incomplete')
         return self
 

@@ -1,6 +1,7 @@
 """Public identity of the personal Discord assistant. No secrets live here."""
 
 DISPLAY_NAME = 'GhostDragon'
+DISPLAY_CHANNEL = '#tradehouse'
 PERSONA = 'asistente personal'
 MODE = 'paper'
 EXECUTION_ENABLED = False
@@ -18,7 +19,7 @@ PERSONAL_COMMANDS = ('ayuda', 'identidad', 'clima', 'tokens', 'recordatorio', 'b
 
 def banner():
     return (
-        f'{CAT} **{DISPLAY_NAME}** — {PERSONA} de MRMBURU.\n'
+        f'{CAT} **{DISPLAY_NAME}** — {PERSONA} de MRMBURU ({DISPLAY_CHANNEL}).\n'
         f'Modo **{MODE}**. `execution_enabled={str(EXECUTION_ENABLED).lower()}`. '
         'No envío órdenes a cTrader.'
     )
@@ -31,7 +32,7 @@ def help_text():
         f'{banner()}\n\n'
         f'**Comandos personales:** {personal}\n'
         f'**Comandos administrativos paper:** {admin}\n\n'
-        'Visible y ejecutable solo en #tradehouse por acfz. '
+        'Los comandos se autorizan por ID de guild, canal, usuario y rol, no por nombres. '
         'Pausa/reanudación solo afecta entradas automáticas paper. '
         '`/paper_order` y `/paper_close` usan la cuenta aislada `discord-sandbox`. '
         'Ningún comando envía órdenes reales ni muestra secretos.'
@@ -48,6 +49,5 @@ def identity_payload():
         'admin_commands': list(ADMIN_COMMANDS),
         'personal_commands': list(PERSONAL_COMMANDS),
         'orders': 'disabled',
-        'channel': 'tradehouse',
-        'operator': 'acfz',
+        'display_channel': DISPLAY_CHANNEL,
     }

@@ -1,10 +1,8 @@
-"""Fail-closed Discord authorization. Commands run only for acfz in #tradehouse."""
+"""Fail-closed Discord authorization using guild, channel, user, and role IDs."""
 import re
 
 class AuthorizationError(PermissionError): pass
 
-REQUIRED_CHANNEL = 'tradehouse'
-REQUIRED_OPERATOR = 'acfz'
 MAX_REASON = 512
 MAX_CITY = 64
 MAX_QUERY = 120
@@ -14,16 +12,13 @@ MAX_POSITION_ID = 36
 _CONTROL = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f]')
 
 
-def allowed(*, guild_id, user_id, role_ids, expected_guild_id, admin_role_id, allowed_user_ids,
-            channel_name='', operator_name='',
-            expected_channel=REQUIRED_CHANNEL, expected_operator=REQUIRED_OPERATOR):
+def allowed(*, guild_id, user_id, role_ids, channel_id, expected_guild_id, expected_channel_id,
+            admin_role_id, allowed_user_ids):
     users = {int(value.strip()) for value in allowed_user_ids.split(',') if value.strip()}
     if guild_id != expected_guild_id:
         raise AuthorizationError('Server not authorized')
-    if (channel_name or '').casefold() != expected_channel.casefold():
+    if channel_id != expected_channel_id:
         raise AuthorizationError('Channel not authorized')
-    if (operator_name or '').casefold() != expected_operator.casefold():
-        raise AuthorizationError('User not authorized')
     if user_id not in users:
         raise AuthorizationError('User not authorized')
     if admin_role_id not in set(role_ids):

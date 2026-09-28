@@ -24,6 +24,15 @@ def test_service_key_must_be_strong_and_distinct_even_without_bot():
     with pytest.raises(ValidationError): settings(discord_api_key='short')
     with pytest.raises(ValidationError): settings(discord_api_key='a'*40)
 
+def test_enabled_bot_requires_channel_id():
+    with pytest.raises(ValidationError):
+        settings(discord_bot_enabled=True, discord_bot_token='t'*40, discord_api_key='d'*40,
+                 discord_guild_id=1, discord_admin_role_id=2, discord_allowed_user_ids='10')
+    configured=settings(discord_bot_enabled=True, discord_bot_token='t'*40, discord_api_key='d'*40,
+                        discord_guild_id=1, discord_admin_role_id=2, discord_channel_id=99,
+                        discord_allowed_user_ids='10')
+    assert configured.discord_channel_id == 99
+
 class Feed(FakeCTraderFeed):
     def instrument(self, symbol):
         return SymbolInfo(name='EURUSD', digits=5, pip_position=4, lot_size='100000',
@@ -35,21 +44,19 @@ def discord_client(factory, monkeypatch):
     configured=settings(discord_api_key=API_KEY)
     with TestClient(create_app(configured,factory,Cache())) as client: yield client
 
-SCOPE=dict(expected_guild_id=1,admin_role_id=20,allowed_user_ids='10',
-           channel_name='tradehouse',operator_name='acfz')
+SCOPE=dict(expected_guild_id=1,expected_channel_id=99,admin_role_id=20,allowed_user_ids='10')
 
 @pytest.mark.parametrize('values',[
-    dict(guild_id=2,user_id=10,role_ids=[20],channel_name='tradehouse',operator_name='acfz'),
-    dict(guild_id=1,user_id=11,role_ids=[20],channel_name='tradehouse',operator_name='acfz'),
-    dict(guild_id=1,user_id=10,role_ids=[21],channel_name='tradehouse',operator_name='acfz'),
-    dict(guild_id=1,user_id=10,role_ids=[20],channel_name='general',operator_name='acfz'),
-    dict(guild_id=1,user_id=10,role_ids=[20],channel_name='tradehouse',operator_name='other')])
-def test_unauthorized_guild_user_role_channel_and_operator_are_rejected(values):
+    dict(guild_id=2,user_id=10,role_ids=[20],channel_id=99),
+    dict(guild_id=1,user_id=11,role_ids=[20],channel_id=99),
+    dict(guild_id=1,user_id=10,role_ids=[21],channel_id=99),
+    dict(guild_id=1,user_id=10,role_ids=[20],channel_id=100)])
+def test_unauthorized_guild_user_role_and_channel_are_rejected(values):
     with pytest.raises(AuthorizationError):
-        allowed(**values,expected_guild_id=1,admin_role_id=20,allowed_user_ids='10')
+        allowed(**values,expected_guild_id=1,expected_channel_id=99,admin_role_id=20,allowed_user_ids='10')
 
-def test_only_acfz_in_tradehouse_is_allowed():
-    assert allowed(guild_id=1,user_id=10,role_ids=[20],**SCOPE) is True
+def test_allowlist_user_in_configured_channel_is_allowed():
+    assert allowed(guild_id=1,user_id=10,role_ids=[20],channel_id=99,**SCOPE) is True
 
 def test_api_service_authentication_required(discord_client):
     assert discord_client.get('/internal/discord/status').status_code == 401
@@ -207,12 +214,13 @@ def test_identity_keeps_paper_and_existing_admin_commands():
     payload = identity.identity_payload()
     assert payload['name'] == 'GhostDragon'
     assert payload['execution_enabled'] is False
-    assert payload['channel'] == 'tradehouse'
-    assert payload['operator'] == 'acfz'
+    assert payload['display_channel'] == '#tradehouse'
+    assert 'operator' not in payload
     text = identity.help_text()
     for name in identity.ADMIN_COMMANDS + identity.PERSONAL_COMMANDS:
         assert '/'+name in text
-    assert 'tradehouse' in text and 'acfz' in text
+    assert '#tradehouse' in text
+    assert 'acfz' not in text
 
 
 def test_gateway_lock_ttl_owner_and_atomic_release():

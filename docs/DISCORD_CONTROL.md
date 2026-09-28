@@ -12,12 +12,14 @@ The container receives only its Discord token, an internal API key, IDs used for
 authorization, and Redis/API addresses. It does not receive the cTrader
 environment variables.
 
-Commands are accepted only in `#tradehouse` and only from Discord username
-`acfz` (plus the configured guild, role, and user-id allowlist). Replies stay
-ephemeral. `/tokens` reports command-usage counts only; it never prints secrets,
-API keys, or `.env` values. `/buscar` rejects URLs and does not run a shell.
-`/clima` queries `https://wttr.in` with a timeout and a response-size cap.
-Reminders use `America/Asuncion`.
+Commands are accepted only when `interaction.channel_id` matches
+`DISCORD_CHANNEL_ID` and `interaction.user.id` is listed in
+`DISCORD_ALLOWED_USER_IDS`. `DISCORD_GUILD_ID` and `DISCORD_ADMIN_ROLE_ID` must
+also match. GhostDragon and `#tradehouse` are display labels only; they are not
+used for authorization. Replies stay ephemeral. `/tokens` reports command-usage
+counts only; it never prints secrets, API keys, or `.env` values. `/buscar`
+rejects URLs and does not run a shell. `/clima` queries `https://wttr.in` with a
+timeout and a response-size cap. Reminders use `America/Asuncion`.
 
 Never run two gateways with the same `DISCORD_BOT_TOKEN`. Stop nanobot (or any
 other Discord client using that token) before enabling this service. Startup
@@ -32,12 +34,13 @@ crash does not lock the token forever because the lock expires.
 3. Under OAuth2 URL Generator select `bot` and `applications.commands`. Grant only
    View Channels and Send Messages. Do not grant Administrator.
 4. Invite it only to the configured guild.
-5. Create or select an administrator role and collect the guild, role, and allowed user IDs.
+5. Create or select an administrator role and collect the guild, channel, role, and allowed user IDs.
 6. Generate the bot token and a separate random internal API key of at least 32 characters.
    Store both only in the VPS `.env`; never paste them into Discord or commit them.
 
 Variables are documented in `.env.example`. `DISCORD_ALLOWED_USER_IDS` is a
-comma-separated allowlist. Guild, allowlisted user, and administrator role must all match.
+comma-separated allowlist of numeric user IDs. Guild, channel, allowlisted user,
+and administrator role IDs must all match.
 The bot calls `/internal/discord/*` with `X-Discord-Api-Key`. The API rejects every
 request to those routes when `DISCORD_API_KEY` is absent or incorrect, including requests
 forwarded by Caddy. The bot healthcheck requires a fresh gateway-ready Redis heartbeat.

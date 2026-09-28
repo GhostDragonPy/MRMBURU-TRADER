@@ -26,6 +26,7 @@ class BotSettings:
     api_key: str
     guild_id: int
     admin_role_id: int
+    channel_id: int
     allowed_user_ids: str
     api_url: str
     redis_url: str
@@ -35,6 +36,7 @@ def load_settings():
     return BotSettings(os.getenv('DISCORD_BOT_ENABLED','false').lower() == 'true',
         os.getenv('DISCORD_BOT_TOKEN',''), os.getenv('DISCORD_API_KEY',''),
         int(os.getenv('DISCORD_GUILD_ID','0')), int(os.getenv('DISCORD_ADMIN_ROLE_ID','0')),
+        int(os.getenv('DISCORD_CHANNEL_ID','0')),
         os.getenv('DISCORD_ALLOWED_USER_IDS',''), os.getenv('DISCORD_API_URL','http://api:8000'),
         os.getenv('REDIS_URL','redis://redis:6379/0'),
         int(os.getenv('DISCORD_RATE_LIMIT_PER_MINUTE','10')))
@@ -61,13 +63,12 @@ async def call(path, interaction, method='GET', payload=None):
 
 def authorize(interaction):
     roles = [role.id for role in getattr(interaction.user, 'roles', ())]
-    channel = getattr(interaction, 'channel', None)
     return allowed(
         guild_id=interaction.guild_id, user_id=interaction.user.id, role_ids=roles,
-        expected_guild_id=settings.guild_id, admin_role_id=settings.admin_role_id,
+        channel_id=interaction.channel_id,
+        expected_guild_id=settings.guild_id, expected_channel_id=settings.channel_id,
+        admin_role_id=settings.admin_role_id,
         allowed_user_ids=settings.allowed_user_ids,
-        channel_name=getattr(channel, 'name', '') or '',
-        operator_name=getattr(interaction.user, 'name', '') or '',
     )
 
 class Confirm(discord.ui.View):
@@ -118,7 +119,7 @@ class Client(discord.Client):
         due = await asyncio.to_thread(personal.due_reminders, cache)
         for item in due:
             channel = self.get_channel(int(item['channel_id']))
-            if channel is None or getattr(channel, 'name', '').casefold() != 'tradehouse':
+            if channel is None or int(item['channel_id']) != settings.channel_id:
                 continue
             mention = f"<@{item['user_id']}>"
             await channel.send(f"{identity.CAT} Recordatorio {mention}: {item['text']}")
@@ -172,7 +173,7 @@ async def tokens(interaction):
     report = personal.usage_report(cache, interaction.user.id)
     await interaction.response.send_message(render(report), ephemeral=True)
 
-@client.tree.command(name='recordatorio',description='Aviso paper en #tradehouse (America/Asuncion)')
+@client.tree.command(name='recordatorio',description='Aviso paper en el canal autorizado (America/Asuncion)')
 async def recordatorio(interaction, minutos:int, texto:str):
     if not await guard(interaction): return
     try:
@@ -278,7 +279,8 @@ async def paper_close(interaction, position_id:str, reason:str):
 def main():
     global lock
     if not settings.enabled: raise SystemExit('Discord bot is disabled')
-    if not all((settings.token,settings.api_key,settings.guild_id,settings.admin_role_id,settings.allowed_user_ids)):
+    if not all((settings.token,settings.api_key,settings.guild_id,settings.admin_role_id,
+                settings.channel_id,settings.allowed_user_ids)):
         raise SystemExit('Discord bot configuration is incomplete')
     lock = gateway_lock.GatewayLock(settings.token)
     lock.acquire(cache)

@@ -10,7 +10,8 @@ identity. Administrative commands (`/status`, `/positions`, `/history`,
 
 The container receives only its Discord token, an internal API key, IDs used for
 authorization, and Redis/API addresses. It does not receive the cTrader
-environment variables.
+environment variables. It joins the edge network only so it can reach Discord;
+it does not publish a public port.
 
 Commands are accepted only when `interaction.channel_id` matches
 `DISCORD_CHANNEL_ID` and `interaction.user.id` is listed in

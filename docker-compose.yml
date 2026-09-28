@@ -80,7 +80,7 @@ services:
     tmpfs: [/tmp]
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
-    networks: [backend]
+    networks: [backend, edge]
     environment:
       DISCORD_BOT_ENABLED: ${DISCORD_BOT_ENABLED:-false}
       DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}

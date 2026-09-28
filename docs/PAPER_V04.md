@@ -1,11 +1,24 @@
 # v0.4: simulador EURUSD/USD (candidato para validación en VPS)
 
+## Estado actual (respecto a Esses y Discord)
+
+El ledger y los costos de esta nota siguen vigentes. La estrategia **por defecto del worker**
+ya no es SMA: `PAPER_STRATEGY=esses-v1` (ver [ESSES_V1.md](ESSES_V1.md)). SMA 5/20 M15
+sigue disponible con `PAPER_STRATEGY=sma` y en el pipeline clásico
+`POST /paper/accounts/{id}/run`.
+
+El control Discord ([DISCORD_CONTROL.md](DISCORD_CONTROL.md)) usa otra cuenta paper
+aislada (`discord-sandbox`) y no escribe el ledger v0.4. El scheduler Esses solo corre
+si `PAPER_SCHEDULER_ENABLED=true` y hay `PAPER_ACCOUNT_ID`. En VPS el default sigue
+siendo scheduler apagado.
+
 ## Alcance
 
 - cTrader entrega datos en solo lectura; NO se envían órdenes, modificaciones ni cierres al broker.
 - Fuente Live conservada como en el VPS. `trading_mode=paper`, `execution_enabled=false`.
 - Cuenta local nueva de USD 100.000, independiente del saldo, posiciones y journal legado de cTrader.
-- Una posición como máximo. Estrategia de referencia SMA 5/20 en velas M15 cerradas.
+- Una posición como máximo. La referencia histórica de este documento es SMA 5/20 M15;
+  el worker actual puede usar Esses v1 en su lugar (sesión NY, no 01:00–20:00 UTC).
 - Sondeo de cotizaciones cada 10 segundos más latencia de consultas. No es streaming tick a tick.
 - Apertura al ask/bid observado, cierre al bid/ask observado; stop y objetivo no garantizan precio.
 - Volumen expresado en unidades EUR (no lotes); restricciones min/max/paso obtenidas del símbolo.

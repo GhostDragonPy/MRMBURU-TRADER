@@ -12,9 +12,13 @@ El gateway de ejecución rechaza toda llamada. La configuración solo admite `pa
 `execution_enabled=false`; cambiar `.env` a `live`, `demo`, `funded`, etc. impide arrancar.
 La base también exige `accounts.mode='paper'`. No hay endpoint que cambie esos valores.
 
+Hay tres vías paper: pipeline SMA+journal, ledger v0.4/Esses y sandbox Discord. No
+comparten saldo ni posiciones. FRED no entra en precios. Discord se autoriza por
+IDs de guild/canal/usuario/rol, no por nombres.
+
 ## Flujo implementado
 
-cTrader market data (bid/ask, OHLC, account) → Strategy Engine → señal →
+cTrader market data (bid/ask, OHLC, account) → Strategy Engine (SMA o Esses) → señal →
 Risk Engine (puede rechazar aunque DeepSeek apruebe) → paper fill local →
 Trade Journal. FRED no entra en precios. No hay envío de órdenes al broker.
 `TRADING_MODE=paper`. `executable` permanece false para el broker.

@@ -88,14 +88,14 @@ la clave de administrador a un agente IA. No hay ruta para cambiar el modo o env
 
 ## Estructura
 
-- `apps/api`, `apps/worker`, `apps/cli.py`, `apps/paper_setup.py`: puntos de entrada.
+- `apps/api`, `apps/worker`, `apps/cli.py`, `apps/paper_setup.py`, `apps/discord_bot`: puntos de entrada.
 - `apps/dashboard`: contrato pendiente de interfaz; aún sin dashboard.
 - `core`: configuración, contratos, persistencia.
-- `services/strategy_engine`, `risk_engine`, `prop_firm_engine`, `execution_engine`, `journal`.
-- `services/ctrader`, `pipeline` (paper + simulador v0.4), `ai_engine`, `market_data`.
-- `infrastructure/postgres/migrations`: esquema versionado (`0001`, `0002_paper_ledger`).
+- `services/strategy_engine` (SMA y Esses v1), `risk_engine`, `prop_firm_engine`, `execution_engine`, `journal`.
+- `services/ctrader`, `pipeline` (paper clásico, simulador v0.4, Esses, discord-sandbox), `ai_engine`, `market_data`.
+- `infrastructure/postgres/migrations`: `0001`, `0002_paper_ledger`, `0003_discord_control`.
 - `tests`, `.github/workflows/ci.yml`: validación.
-- `docs/architecture.md`, `docs/roadmap.md`, `docs/PAPER_V04.md`: decisiones y paper v0.4.
+- `docs/architecture.md`, `docs/roadmap.md`, `docs/PAPER_V04.md`, `docs/ESSES_V1.md`, `docs/DISCORD_CONTROL.md`.
 
 Los módulos Python usan `_` en vez de `-` para ser importables. Se mantienen en un
 monolito modular; separar servicios desplegables cuando la carga lo justifique.

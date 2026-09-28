@@ -11,12 +11,46 @@ from core.config import get_settings
 from core.database import session_factory
 
 
+def maintain_broker_socket(settings, factory, cache, demo_sdk):
+    mode = getattr(settings, 'trading_mode', 'paper')
+    if mode not in ('demo-orders', 'prop-sim'):
+        return
+    import json as json_lib
+    with factory.begin() as session:
+        if mode == 'demo-orders':
+            from services.demo_orders.factory import open_shadow_session
+            from services.demo_orders.service import control
+            key = 'demo:socket'
+            ok_key = 'demo:preflight:ok'
+        else:
+            from services.prop_sim_orders.factory import open_shadow_session
+            from services.prop_sim_orders.service import control
+            key = 'prop-sim:socket'
+            ok_key = 'prop-sim:preflight:ok'
+        demo = control(session)
+        if demo.rollout not in ('shadow', 'canary', 'enabled'):
+            return
+        sess = demo_sdk.get('session')
+        if sess is None or not getattr(sess, 'healthy', False):
+            try:
+                sess = open_shadow_session(settings, cache, demo=demo)
+                demo_sdk['session'] = sess
+            except Exception as exc:
+                logging.error('%s socket unavailable: %s', mode, type(exc).__name__)
+                return
+        if sess is not None:
+            cache.set(key, json_lib.dumps(sess.snapshot_status()))
+            if sess.trading_permission == 'VERIFIED':
+                cache.set(ok_key, '1', ex=3600)
+
+
 def paper_loop(settings, factory, cache, stop, demo_sdk=None):
     from services.ctrader.feed import feed_from_settings
     from services.pipeline.simulator import cycle
     demo_sdk = demo_sdk if demo_sdk is not None else {'session': None}
     while not stop.is_set():
         try:
+            maintain_broker_socket(settings, factory, cache, demo_sdk)
             if getattr(settings, 'paper_strategy', 'sma') == 'esses-v1':
                 from services.ctrader.stream import active
                 if not active(datetime.now(timezone.utc)):

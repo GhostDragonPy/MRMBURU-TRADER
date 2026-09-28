@@ -166,7 +166,7 @@ def collect_session(settings, cache, stop, lock):
         meta = feed.instrument('EURUSD')
         cache.set(key+':instrument', meta.model_dump_json(), ex=604800)
         books = {tf: [] for tf in FRAMES}
-        for tf in ('M1', 'M15'):
+        for tf in FRAMES:
             books[tf] = feed.ohlc('EURUSD', tf, 40)
             cache.set(key+':bars:'+tf, json.dumps([b.model_dump(mode='json') for b in books[tf]]), ex=604800)
         connection.request(ProtoOASubscribeSpotsReq(ctidTraderAccountId=feed.account_id,

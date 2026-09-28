@@ -10,7 +10,13 @@ from services.ctrader.types import CTraderUnavailable
 from tests.test_esses import NOW, fixture
 
 
-def test_partial_quotes_do_not_retimestamp_stale_side():
+def test_collector_bootstraps_all_esses_frames():
+    import inspect
+    from services.ctrader.stream import collect_session, FRAMES
+    assert FRAMES == ('M1', 'M5', 'M15', 'H1', 'H4', 'D1')
+    source = inspect.getsource(collect_session)
+    assert 'for tf in FRAMES' in source
+    assert "for tf in ('M1', 'M15')" not in source
     cache=Mock(); quotes={}; books={tf:[] for tf in FRAMES}
     event=ProtoOASpotEvent(ctidTraderAccountId=1,symbolId=1,bid=110000,timestamp=int(NOW.timestamp()*1000))
     store_event(event,cache,'x',books,quotes,NOW)

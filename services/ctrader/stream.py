@@ -6,11 +6,13 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal as D
 from time import monotonic
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from ctrader_open_api.messages.OpenApiCommonMessages_pb2 import ProtoHeartbeatEvent
 from ctrader_open_api.messages.OpenApiMessages_pb2 import (
-    ProtoOAGetTrendbarsReq, ProtoOASpotEvent, ProtoOASubscribeSpotsReq, ProtoOASubscribeLiveTrendbarReq,
+    ProtoOAGetTrendbarsReq, ProtoOASpotEvent, ProtoOASubscribeLiveTrendbarRes,
+    ProtoOASubscribeSpotsReq, ProtoOASubscribeLiveTrendbarReq,
 )
 from ctrader_open_api.messages.OpenApiModelMessages_pb2 import ProtoOATrendbarPeriod
 from services.ctrader.client import open_demo
@@ -164,14 +166,15 @@ def collect_session(settings, cache, stop, lock):
         meta = feed.instrument('EURUSD')
         cache.set(key+':instrument', meta.model_dump_json(), ex=604800)
         books = {tf: [] for tf in FRAMES}
-        connection.request(ProtoOASubscribeSpotsReq(ctidTraderAccountId=feed.account_id,
-            symbolId=[light.symbolId], subscribeToSpotTimestamp=True))
         for tf in ('M1', 'M15'):
             books[tf] = feed.ohlc('EURUSD', tf, 40)
             cache.set(key+':bars:'+tf, json.dumps([b.model_dump(mode='json') for b in books[tf]]), ex=604800)
+        connection.request(ProtoOASubscribeSpotsReq(ctidTraderAccountId=feed.account_id,
+            symbolId=[light.symbolId], subscribeToSpotTimestamp=True))
         for tf in FRAMES:
-            connection.request(ProtoOASubscribeLiveTrendbarReq(ctidTraderAccountId=feed.account_id,
-                symbolId=light.symbolId, period=ProtoOATrendbarPeriod.Value(tf)))
+            connection._write(ProtoOASubscribeLiveTrendbarReq(ctidTraderAccountId=feed.account_id,
+                symbolId=light.symbolId, period=ProtoOATrendbarPeriod.Value(tf)), 'tb-'+tf+'-'+uuid4().hex[:8])
+            connection.wait_for(ProtoOASubscribeLiveTrendbarRes)
         cache.set(key+':status', 'connected', ex=30)
         quotes = {}
         beat = 0

@@ -350,3 +350,85 @@ def test_paper_mode_skips_prop_sim(factory):
             gateway=PropSimCTraderExecutionGateway(transport), token_scope='trading')
     assert out['skipped'] == 'paper-mode'
     assert transport.submits == []
+
+
+def test_renew_preflight_skips_when_fresh_and_rewrites_near_expiry(factory):
+    from core.models import PropSimPreflight
+    from services.prop_sim_orders.preflight import (
+        record_preflight, renew_preflight_if_needed, require_verified_preflight,
+    )
+    cfg = prop_sim_settings()
+    with factory.begin() as session:
+        record_preflight(session, cfg, now=NOW, ttl_seconds=86400, extra_detail={
+            'trading_permission': 'VERIFIED', 'socket': 'sdk-tls'})
+        assert renew_preflight_if_needed(
+            session, cfg, trading_permission='VERIFIED', now=NOW,
+            renew_within_seconds=21600) is False
+        assert renew_preflight_if_needed(
+            session, cfg, trading_permission='UNVERIFIED', now=NOW) is False
+        near = NOW + timedelta(hours=19)
+        assert renew_preflight_if_needed(
+            session, cfg, trading_permission='VERIFIED', now=near,
+            renew_within_seconds=21600) is True
+        row = session.get(PropSimPreflight, 1)
+        assert row.expires_at == near + timedelta(seconds=86400)
+        assert (row.detail or {}).get('renewed') is True
+        require_verified_preflight(session, cfg, now=near)
+
+
+def test_renew_preflight_rewrites_expired_row(factory):
+    from services.prop_sim_orders.preflight import (
+        record_preflight, renew_preflight_if_needed, require_verified_preflight,
+    )
+    cfg = prop_sim_settings()
+    with factory.begin() as session:
+        record_preflight(session, cfg, now=NOW - timedelta(days=2), ttl_seconds=86400,
+                         extra_detail={'trading_permission': 'VERIFIED', 'socket': 'sdk-tls'})
+        with pytest.raises(DemoGuardError, match='PREFLIGHT_EXPIRED'):
+            require_verified_preflight(session, cfg, now=NOW)
+        assert renew_preflight_if_needed(
+            session, cfg, trading_permission='VERIFIED', now=NOW) is True
+        require_verified_preflight(session, cfg, now=NOW)
+
+
+def test_worker_maintains_prop_sim_preflight_on_verified_socket(factory, monkeypatch):
+    import services.prop_sim_orders.preflight as preflight_mod
+    from apps.worker.main import maintain_broker_socket
+    from core.models import PropSimPreflight
+
+    cfg = prop_sim_settings()
+    cache = type('C', (), {
+        'store': {},
+        'set': lambda self, k, v, ex=None: self.store.__setitem__(k, v),
+        'get': lambda self, k: self.store.get(k),
+    })()
+    calls = []
+    real_renew = preflight_mod.renew_preflight_if_needed
+
+    class Sess:
+        healthy = True
+        trading_permission = 'VERIFIED'
+
+        def snapshot_status(self):
+            return {'healthy': True}
+
+    with factory.begin() as session:
+        demo = service.control(session)
+        demo.rollout = 'enabled'
+        demo.blocked = False
+        preflight_mod.record_preflight(
+            session, cfg, now=NOW - timedelta(hours=20), ttl_seconds=86400,
+            extra_detail={'trading_permission': 'VERIFIED', 'socket': 'sdk-tls'})
+
+    def fake_renew(session, settings, *, trading_permission='VERIFIED', **kw):
+        calls.append(trading_permission)
+        return real_renew(session, settings, trading_permission=trading_permission,
+                          now=NOW, **kw)
+
+    monkeypatch.setattr(preflight_mod, 'renew_preflight_if_needed', fake_renew)
+    maintain_broker_socket(cfg, factory, cache, {'session': Sess()})
+    assert calls == ['VERIFIED']
+    with factory.begin() as session:
+        row = session.get(PropSimPreflight, 1)
+        assert row is not None
+        assert (row.detail or {}).get('renewed') is True

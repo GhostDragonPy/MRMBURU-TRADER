@@ -42,6 +42,15 @@ def maintain_broker_socket(settings, factory, cache, demo_sdk):
             cache.set(key, json_lib.dumps(sess.snapshot_status()))
             if sess.trading_permission == 'VERIFIED':
                 cache.set(ok_key, '1', ex=3600)
+                if mode == 'prop-sim':
+                    try:
+                        from services.prop_sim_orders.preflight import renew_preflight_if_needed
+                        if renew_preflight_if_needed(
+                                session, settings,
+                                trading_permission=sess.trading_permission):
+                            logging.info('PROP SIM preflight renewed')
+                    except Exception as exc:
+                        logging.error('PROP SIM preflight renew failed: %s', type(exc).__name__)
 
 
 def paper_loop(settings, factory, cache, stop, demo_sdk=None):

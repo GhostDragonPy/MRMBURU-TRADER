@@ -10,6 +10,34 @@ from services.ctrader.types import CTraderUnavailable
 from tests.test_esses import NOW, fixture
 
 
+def test_bars_stale_detects_missing_and_old_m1():
+    from services.ctrader.stream import bars_stale
+    from services.ctrader.types import OhlcBar
+    assert bars_stale({'M1': []}, NOW) is True
+    fresh = OhlcBar(symbol='EURUSD', timeframe='M1', open='1.1', high='1.1',
+                    low='1.1', close='1.1', volume='1', closed_at=NOW - timedelta(seconds=30))
+    assert bars_stale({'M1': [fresh]}, NOW) is False
+    old = fresh.model_copy(update={'closed_at': NOW - timedelta(seconds=181)})
+    assert bars_stale({'M1': [old]}, NOW) is True
+
+
+def test_reconnect_delay_is_fast_on_stale_and_slow_on_rate_limit():
+    from services.ctrader.stream import reconnect_delay
+    assert reconnect_delay() == 30
+    assert reconnect_delay(Exception('Cached M1 bars went stale; reconnecting')) == 15
+    assert reconnect_delay(Exception('rate limited by broker')) == 120
+
+
+def test_collector_loop_checks_stale_bars_and_reconnects():
+    import inspect
+    from services.ctrader.stream import collect_session, collector_loop
+    source = inspect.getsource(collect_session)
+    assert 'bars_stale' in source
+    assert "stale_bars" in source
+    loop = inspect.getsource(collector_loop)
+    assert 'reconnect_delay' in loop
+
+
 def test_collector_bootstraps_all_esses_frames():
     import inspect
     from services.ctrader.stream import collect_session, FRAMES

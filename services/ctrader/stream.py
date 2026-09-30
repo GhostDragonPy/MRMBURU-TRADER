@@ -162,6 +162,27 @@ def _cached_bars(cache, key, tf):
     return [OhlcBar.model_validate(row) for row in json.loads(raw)]
 
 
+def bars_stale(books, now=None, *, max_age_seconds=180):
+    """True when the live M1 book is missing or older than Esses will accept."""
+    now = now or datetime.now(timezone.utc)
+    rows = books.get('M1') or []
+    if not rows:
+        return True
+    last = rows[-1].closed_at
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    return (now - last).total_seconds() > max_age_seconds
+
+
+def reconnect_delay(exc=None):
+    """Faster recovery after drops; keep rate-limit backoff longer."""
+    if exc is not None and 'rate limited' in str(exc).lower():
+        return 120
+    if exc is not None and 'stale' in str(exc).lower():
+        return 15
+    return 30
+
+
 def collect_session(settings, cache, stop, lock):
     if settings.ctrader_environment not in ('demo', 'live'):
         raise CTraderUnavailable('Esses collector requires a verified read-only source account')
@@ -195,6 +216,10 @@ def collect_session(settings, cache, stop, lock):
         quotes = {}
         beat = 0
         while not stop.is_set() and fx_open(datetime.now(timezone.utc)):
+            now = datetime.now(timezone.utc)
+            if bars_stale(books, now):
+                cache.set(key+':status', 'stale_bars', ex=60)
+                raise CTraderUnavailable('Cached M1 bars went stale; reconnecting collector')
             if monotonic()-beat >= 9:
                 # Renew ownership BEFORE any outbound write, including heartbeat.
                 lock.extend(300, replace_ttl=True)
@@ -223,6 +248,7 @@ def collector_loop(settings, cache, stop):
             continue
         lock = cache.lock(key+':owner', timeout=300, blocking=False)
         acquired = False
+        delay = 30
         try:
             acquired = lock.acquire()
             if not acquired:
@@ -236,9 +262,10 @@ def collector_loop(settings, cache, stop):
                 cache.delete(key+':tick')
             except Exception:
                 pass
-            delay = 120 if 'rate limited' in str(exc).lower() else 300
+            delay = reconnect_delay(exc)
         else:
-            delay = 300
+            # Session ended cleanly (FX closed or stop). Recheck soon when FX reopens.
+            delay = 30
         finally:
             if acquired:
                 try:

@@ -95,6 +95,34 @@ def require_verified_preflight(session, settings, *, now=None):
     return row
 
 
+def renew_preflight_if_needed(session, settings, *, trading_permission='VERIFIED',
+                              now=None, ttl_seconds=86400, renew_within_seconds=21600):
+    """Refresh persisted preflight before it can block the next Esses window.
+
+    Returns True when a new preflight row was written. Never sends broker orders.
+    """
+    now = now or datetime.now(timezone.utc)
+    if trading_permission != 'VERIFIED':
+        return False
+    row = current_preflight(session)
+    if row is not None and row.status == 'passed':
+        expires = row.expires_at if row.expires_at.tzinfo else row.expires_at.replace(tzinfo=timezone.utc)
+        if expires > now + timedelta(seconds=int(renew_within_seconds)):
+            return False
+        if str(row.account_id) != PROP_SIM_CTID or str(row.trader_login) != PROP_SIM_TRADER_LOGIN:
+            pass  # force rewrite below
+        elif row.fingerprint == expected_fingerprint(settings) and expires > now:
+            # Still valid but inside renew window — refresh TTL.
+            pass
+    record_preflight(
+        session, settings, now=now, status='passed', ttl_seconds=ttl_seconds,
+        extra_detail={'trading_permission': trading_permission, 'socket': 'sdk-tls',
+                      'permission_metadata': 'ProtoOAGetAccountListByAccessTokenRes.permissionScope',
+                      'renewed': True},
+    )
+    return True
+
+
 def public_preflight(session, settings):
     row = current_preflight(session)
     if row is None:

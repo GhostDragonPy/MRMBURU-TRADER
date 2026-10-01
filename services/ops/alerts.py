@@ -1,11 +1,14 @@
 """Deduped Discord channel alerts for collector / preflight / AI health."""
+import json
 import logging
 from datetime import datetime, timezone
 
 from services.providers.http import ProviderError, request_json
 
 ALERT_PREFIX = 'ops:alert:v1:'
+ALERT_QUEUE = 'discord:ops_alerts'
 DEFAULT_COOLDOWN_SECONDS = 1800
+DISCORD_USER_AGENT = 'MRMBURU-Trader-Ops (https://trader.acshop.shop, 1.0)'
 
 
 def alerts_enabled(settings):
@@ -18,10 +21,46 @@ def alerts_enabled(settings):
     )
 
 
+def _mark_cooldown(cache, key, seconds):
+    try:
+        cache.set(key, datetime.now(timezone.utc).isoformat(), ex=int(seconds))
+    except Exception:
+        pass
+
+
+def _enqueue(cache, kind, message, channel_id):
+    """Fallback path: discord-bot gateway already bypasses Cloudflare."""
+    try:
+        cache.rpush(ALERT_QUEUE, json.dumps({
+            'kind': kind,
+            'message': message,
+            'channel_id': str(int(channel_id)),
+            'at': datetime.now(timezone.utc).isoformat(),
+        }))
+        cache.ltrim(ALERT_QUEUE, -50, -1)
+        return True
+    except Exception:
+        return False
+
+
+def due_alerts(cache, *, limit=10):
+    rows = []
+    for _ in range(int(limit)):
+        raw = cache.lpop(ALERT_QUEUE)
+        if not raw:
+            break
+        try:
+            rows.append(json.loads(raw))
+        except (TypeError, json.JSONDecodeError):
+            continue
+    return rows
+
+
 def notify(settings, cache, *, kind, message, cooldown_seconds=DEFAULT_COOLDOWN_SECONDS):
     """Send at most one Discord message per kind inside the cooldown window.
 
-    Returns True when a message was delivered. Never raises to callers.
+    Tries Discord REST first; on Cloudflare/network failure enqueues for the bot.
+    Returns True when delivered or queued. Never raises to callers.
     """
     if not kind or not message or cache is None or not alerts_enabled(settings):
         return False
@@ -39,21 +78,24 @@ def notify(settings, cache, *, kind, message, cooldown_seconds=DEFAULT_COOLDOWN_
             headers={
                 'Authorization': f"Bot {settings.discord_bot_token.get_secret_value()}",
                 'Content-Type': 'application/json',
+                'User-Agent': DISCORD_USER_AGENT,
             },
             payload={'content': body},
             timeout=10,
         )
-        try:
-            cache.set(key, datetime.now(timezone.utc).isoformat(), ex=int(cooldown_seconds))
-        except Exception:
-            pass
+        _mark_cooldown(cache, key, cooldown_seconds)
         return True
     except ProviderError as exc:
-        logging.error('Ops Discord alert failed: %s', type(exc).__name__)
-        return False
+        logging.error('Ops Discord REST failed: %s; queueing for bot', type(exc).__name__)
+        queued = _enqueue(cache, kind, message, settings.discord_channel_id)
+        # Cooldown even on failure so the worker does not hammer Discord/queue.
+        _mark_cooldown(cache, key, min(int(cooldown_seconds), 300) if not queued else cooldown_seconds)
+        return queued
     except Exception:
         logging.error('Ops Discord alert failed', exc_info=False)
-        return False
+        queued = _enqueue(cache, kind, message, settings.discord_channel_id)
+        _mark_cooldown(cache, key, 300)
+        return queued
 
 
 def watch_worker_health(settings, cache):

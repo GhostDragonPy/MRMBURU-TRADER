@@ -77,9 +77,12 @@ def test_ops_alert_dedupes_and_posts(monkeypatch):
         discord_allowed_user_ids='9',
     )
     store = {}
+    queue = []
     cache = Mock()
     cache.get.side_effect = lambda k: store.get(k)
     cache.set.side_effect = lambda k, v, ex=None: store.__setitem__(k, v)
+    cache.rpush.side_effect = lambda k, v: queue.append(v) or 1
+    cache.ltrim.return_value = True
     calls = []
 
     def fake_request(url, **kw):
@@ -91,3 +94,34 @@ def test_ops_alert_dedupes_and_posts(monkeypatch):
     assert alerts.notify(cfg, cache, kind='collector_budget', message='budget dead') is False
     assert len(calls) == 1
     assert 'collector_budget' in calls[0][1]
+
+
+def test_ops_alert_queues_when_rest_blocked(monkeypatch):
+    cfg = base_settings(
+        deepseek_api_key='sk-test',
+        discord_bot_enabled=True,
+        discord_bot_token='b' * 40,
+        discord_api_key='d' * 40,
+        discord_guild_id=1,
+        discord_admin_role_id=2,
+        discord_channel_id=3,
+        discord_allowed_user_ids='9',
+    )
+    store = {}
+    queue = []
+    cache = Mock()
+    cache.get.side_effect = lambda k: store.get(k)
+    cache.set.side_effect = lambda k, v, ex=None: store.__setitem__(k, v)
+    cache.rpush.side_effect = lambda k, v: queue.append(v) or len(queue)
+    cache.ltrim.return_value = True
+    cache.lpop.side_effect = lambda k: queue.pop(0) if queue else None
+
+    def boom(*a, **k):
+        from services.providers.http import ProviderError
+        raise ProviderError('403 blocked')
+
+    monkeypatch.setattr(alerts, 'request_json', boom)
+    assert alerts.notify(cfg, cache, kind='collector_budget', message='budget dead') is True
+    assert len(queue) == 1
+    due = alerts.due_alerts(cache)
+    assert due[0]['kind'] == 'collector_budget'

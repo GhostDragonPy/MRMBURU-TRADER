@@ -118,6 +118,7 @@ class Client(discord.Client):
                 except Exception:
                     await self.close(); return
                 await self.flush_reminders()
+                await self.flush_ops_alerts()
             await asyncio.sleep(15)
 
     async def flush_reminders(self):
@@ -128,6 +129,23 @@ class Client(discord.Client):
                 continue
             mention = f"<@{item['user_id']}>"
             await channel.send(f"{identity.CAT} Recordatorio {mention}: {item['text']}")
+
+    async def flush_ops_alerts(self):
+        from services.ops.alerts import due_alerts
+        due = await asyncio.to_thread(due_alerts, cache)
+        for item in due:
+            try:
+                channel_id = int(item.get('channel_id') or settings.channel_id)
+            except (TypeError, ValueError):
+                continue
+            if channel_id != settings.channel_id:
+                continue
+            channel = self.get_channel(channel_id)
+            if channel is None:
+                continue
+            kind = item.get('kind') or 'ops'
+            message = item.get('message') or ''
+            await channel.send(f"{identity.CAT} **GhostDragon ops** · `{kind}`\n{message}"[:1900])
 
     async def close(self):
         if lock is not None:

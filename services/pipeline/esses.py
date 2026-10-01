@@ -1,5 +1,6 @@
 """Use the common accounting engine with multi-timeframe Esses signals."""
 import json
+import logging
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from sqlalchemy import select
@@ -32,7 +33,55 @@ def calendar(cache, now):
     return data
 
 
-def cycle(session, feed, account_id, *, cache, now=None, allow_unknown_news=False):
+def apply_ai_filter(settings, signal, audit, tick, cache=None):
+    """DeepSeek pass/fail for Esses entries. Reject blocks; outages fail-open + alert."""
+    if signal is None or settings is None:
+        return signal, audit, []
+    from services.ai_engine import deepseek
+    if not deepseek.configured(settings):
+        audit = dict(audit or {})
+        audit['ai_filter'] = {'provider': 'deepseek', 'approved': None, 'skipped': True,
+                              'reason': 'not_configured'}
+        return signal, audit, []
+    extra = []
+    quote = tick.model_dump(mode='json') if tick is not None else {}
+    try:
+        review = deepseek.review_esses_setup(
+            settings, signal=signal, audit=audit or {}, quote=quote)
+    except deepseek.DeepSeekUnavailable as exc:
+        logging.error('Esses AI filter unavailable: %s', type(exc).__name__)
+        review = {'provider': 'deepseek', 'approved': None, 'skipped': True,
+                  'reason': 'unavailable', 'error': type(exc).__name__}
+        try:
+            from services.ops.alerts import notify
+            notify(settings, cache, kind='ai_filter_down',
+                   message='DeepSeek no respondió; Esses sigue sin filtro IA (fail-open).')
+        except Exception:
+            pass
+    audit = dict(audit or {})
+    audit['ai_filter'] = review
+    if review.get('approved') is False:
+        extra.append({
+            'kind': 'blocked',
+            'at': datetime.now(timezone.utc).isoformat(),
+            'reasons': ['AI_REJECTED'],
+            'ai_filter': review,
+        })
+        return None, audit, extra
+    if review.get('approved') is True:
+        ctx = dict(signal.context or {})
+        ctx['ai_filter'] = {
+            'provider': review.get('provider'),
+            'model': review.get('model'),
+            'approved': True,
+            'confidence': review.get('confidence'),
+            'rationale': review.get('rationale'),
+        }
+        signal = signal.model_copy(update={'context': ctx})
+    return signal, audit, extra
+
+
+def cycle(session, feed, account_id, *, cache, now=None, allow_unknown_news=False, settings=None):
     tick = feed.tick('EURUSD')
     now = now or datetime.now(timezone.utc)
     # Lock before deciding whether entry history is necessary, so management
@@ -49,6 +98,7 @@ def cycle(session, feed, account_id, *, cache, now=None, allow_unknown_news=Fals
             now.astimezone(ZoneInfo(rules.timezone)).date().isoformat()))
         session.add(row)
     signal, audit, bars, news = None, {}, [], None
+    ai_events = []
     meta = SymbolInfo(name='EURUSD', digits=5)
     if row.state.get('position'):
         # Optional BE history must never prevent quote-based exits.
@@ -62,12 +112,14 @@ def cycle(session, feed, account_id, *, cache, now=None, allow_unknown_news=Fals
         bars = frames['M1']
         meta = feed.instrument('EURUSD')
         news = calendar(cache, now)
+        signal, audit, ai_events = apply_ai_filter(settings, signal, audit, tick, cache=cache)
     policy = RiskPolicy.model_validate(account.risk_policy)
     policy = policy.model_copy(update={'max_trades_daily': min(policy.max_trades_daily,2)})
     state, events = advance(row.state, tick=tick, bars=bars, instrument=meta, now=now,
         policy=policy, rules=rules, enabled=account.enabled, killed=gate is None or gate.active or bool(control and control.paused),
         allow_unknown_news=allow_unknown_news, strategy=SelectedSignal(signal),
         timeframe='M1', esses=True, audit=audit, news=news)
+    events = list(ai_events) + list(events)
     state['strategy'] = 'esses-research:1'
     state['news_known'] = bool(news) if not row.state.get('position') else row.state.get('news_known', False)
     state['last_analysis'] = audit if audit else state.get('last_analysis', {})

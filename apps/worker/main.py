@@ -74,7 +74,8 @@ def paper_loop(settings, factory, cache, stop, demo_sdk=None):
                     from services.pipeline.esses import cycle as esses_cycle
                     result = esses_cycle(session, feed_from_settings(settings, cache),
                         settings.paper_account_id, cache=cache,
-                        allow_unknown_news=settings.paper_allow_unknown_news)
+                        allow_unknown_news=settings.paper_allow_unknown_news,
+                        settings=settings)
                     if settings.trading_mode == 'demo-orders':
                         from services.ctrader import tokens as token_store
                         from services.demo_orders.factory import build_gateway, open_shadow_session
@@ -164,6 +165,11 @@ def main():
         try:
             with factory() as s:s.execute(text('SELECT 1'))
             cache.set('worker:heartbeat',datetime.now(timezone.utc).isoformat(),ex=30)
+            try:
+                from services.ops.alerts import watch_worker_health
+                watch_worker_health(settings, cache)
+            except Exception:
+                logging.error('Ops health watch failed', exc_info=False)
         except Exception:
             logging.error('Worker dependencies unavailable; execution disabled')
         stop.wait(10)

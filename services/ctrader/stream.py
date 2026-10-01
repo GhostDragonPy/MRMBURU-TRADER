@@ -275,12 +275,30 @@ def collector_loop(settings, cache, stop):
         except Exception as exc:
             failures += 1
             logging.error('Collector stopped: %s', exc)
+            label = 'error:' + type(exc).__name__
             try:
-                cache.set(key+':status', 'error:'+type(exc).__name__, ex=300)
+                msg = str(exc).lower()
+                if 'budget exhausted' in msg or 'budget unavailable' in msg:
+                    label = 'error:budget_exhausted'
+                elif 'stale' in msg:
+                    label = 'stale_bars'
+                elif 'rate limited' in msg:
+                    label = 'error:rate_limited'
+                cache.set(key+':status', label, ex=300)
                 cache.delete(key+':tick')
             except Exception:
                 pass
             delay = reconnect_delay(exc, failures=failures)
+            try:
+                from services.ops.alerts import notify
+                if 'budget' in label:
+                    notify(settings, cache, kind='collector_budget',
+                           message='Collector: presupuesto cTrader agotado. Backoff 15 min.')
+                elif label == 'stale_bars' and failures >= 3:
+                    notify(settings, cache, kind='collector_stale',
+                           message=f'Collector: M1 stale repetido (fallos={failures}).')
+            except Exception:
+                pass
         else:
             # Session ended cleanly (FX closed or stop). Recheck soon when FX reopens.
             failures = 0

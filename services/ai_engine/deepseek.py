@@ -38,6 +38,89 @@ def ping(settings):
     return {'provider': 'deepseek', 'ok': True, 'models': ids[:8]}
 
 
+REVIEW_SYSTEM = (
+    'You are a risk-aware EURUSD structure reviewer for the Esses strategy. '
+    'Return JSON only. Approve only coherent, timely setups. '
+    'Never change stop, target, size, or side. Never claim broker execution. '
+    'JSON schema: {"approved": boolean, "confidence": "low"|"medium"|"high", '
+    '"rationale": string}'
+)
+
+
+def review_esses_setup(settings, *, signal, audit=None, quote=None):
+    """Advisory pass/fail filter for an Esses signal. Never mutates brackets.
+
+    Returns a dict with approved True/False, or approved None when skipped.
+    """
+    if signal is None:
+        return {'provider': 'deepseek', 'approved': None, 'skipped': True, 'reason': 'no_signal'}
+    if not configured(settings):
+        return {'provider': 'deepseek', 'approved': None, 'skipped': True, 'reason': 'not_configured'}
+    payload_user = {
+        'task': 'Approve or reject this Esses EURUSD setup',
+        'signal': {
+            'symbol': signal.symbol,
+            'side': signal.side,
+            'entry': str(signal.entry),
+            'stop_loss': str(signal.stop_loss),
+            'take_profit': str(signal.take_profit),
+            'timeframe': signal.timeframe,
+            'strategy_version': signal.strategy_version,
+            'reasons': list(signal.reasons),
+            'context': signal.context,
+        },
+        'audit': audit or {},
+        'quote': quote or {},
+        'now': datetime.now(timezone.utc).isoformat(),
+    }
+    last_error = None
+    used_model = MODEL
+    data = None
+    for used_model in (MODEL, FALLBACK_MODEL):
+        body = {
+            'model': used_model,
+            'temperature': 0,
+            'response_format': {'type': 'json_object'},
+            'messages': [
+                {'role': 'system', 'content': REVIEW_SYSTEM},
+                {'role': 'user', 'content': json.dumps(payload_user, default=str)},
+            ],
+        }
+        try:
+            data = request_json(
+                DEEPSEEK_URL,
+                method='POST',
+                headers=_headers(settings.deepseek_api_key.get_secret_value()),
+                payload=body,
+                timeout=45,
+            )
+            break
+        except ProviderError as exc:
+            last_error = exc
+    if data is None:
+        raise DeepSeekUnavailable(str(last_error)) from last_error
+    try:
+        content = data['choices'][0]['message']['content']
+        parsed = json.loads(content)
+    except (KeyError, IndexError, json.JSONDecodeError) as exc:
+        raise DeepSeekUnavailable('DeepSeek returned an unreadable review') from exc
+    approved = parsed.get('approved')
+    if not isinstance(approved, bool):
+        raise DeepSeekUnavailable('DeepSeek review missing boolean approved')
+    confidence = str(parsed.get('confidence') or 'medium').lower()
+    if confidence not in ('low', 'medium', 'high'):
+        confidence = 'medium'
+    return {
+        'provider': 'deepseek',
+        'model': used_model,
+        'approved': approved,
+        'confidence': confidence,
+        'rationale': str(parsed.get('rationale') or '')[:800],
+        'usage': data.get('usage'),
+        'skipped': False,
+    }
+
+
 def propose(settings, *, symbol, timeframe, quantity, value_per_price_unit, quote=None, context=None):
     if not configured(settings):
         raise DeepSeekUnavailable('DEEPSEEK_API_KEY is not set')

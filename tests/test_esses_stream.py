@@ -24,8 +24,11 @@ def test_bars_stale_detects_missing_and_old_m1():
 def test_reconnect_delay_is_fast_on_stale_and_slow_on_rate_limit():
     from services.ctrader.stream import reconnect_delay
     assert reconnect_delay() == 30
-    assert reconnect_delay(Exception('Cached M1 bars went stale; reconnecting')) == 15
-    assert reconnect_delay(Exception('rate limited by broker')) == 120
+    assert reconnect_delay(Exception('Cached M1 bars went stale; reconnecting')) == 60
+    assert reconnect_delay(Exception('Cached M1 bars went stale; reconnecting'), failures=2) == 240
+    assert reconnect_delay(Exception('rate limited by broker')) == 180
+    assert reconnect_delay(Exception('cTrader request budget exhausted; network blocked')) == 900
+    assert reconnect_delay(Exception('cTrader request budget unavailable; network blocked')) == 900
 
 
 def test_collector_loop_checks_stale_bars_and_reconnects():
@@ -34,8 +37,11 @@ def test_collector_loop_checks_stale_bars_and_reconnects():
     source = inspect.getsource(collect_session)
     assert 'bars_stale' in source
     assert "stale_bars" in source
+    assert 'waiting_live_bars' in source
+    assert 'stale_grace_seconds' in source
     loop = inspect.getsource(collector_loop)
     assert 'reconnect_delay' in loop
+    assert 'failures' in loop
 
 
 def test_collector_bootstraps_all_esses_frames():

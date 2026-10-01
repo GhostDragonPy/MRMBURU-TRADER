@@ -174,13 +174,21 @@ def bars_stale(books, now=None, *, max_age_seconds=180):
     return (now - last).total_seconds() > max_age_seconds
 
 
-def reconnect_delay(exc=None):
-    """Faster recovery after drops; keep rate-limit backoff longer."""
-    if exc is not None and 'rate limited' in str(exc).lower():
-        return 120
-    if exc is not None and 'stale' in str(exc).lower():
-        return 15
-    return 30
+def reconnect_delay(exc=None, *, failures=0):
+    """Back off hard on budget/rate limits; escalate repeated stale reconnects.
+
+    A tight stale→bootstrap loop can burn the entire daily outbound budget
+    before the NY window opens; never retry those cases every few seconds.
+    """
+    msg = str(exc).lower() if exc is not None else ''
+    failures = max(0, int(failures))
+    if 'budget exhausted' in msg or 'budget unavailable' in msg:
+        return 900
+    if 'rate limited' in msg:
+        return 180
+    if 'stale' in msg:
+        return min(600, 60 * (2 ** min(failures, 3)))
+    return min(300, 30 * (2 ** min(failures, 3)))
 
 
 def collect_session(settings, cache, stop, lock):
@@ -215,16 +223,24 @@ def collect_session(settings, cache, stop, lock):
         cache.set(key+':status', 'connected', ex=30)
         quotes = {}
         beat = 0
+        # After subscribe, give live trendbars time to arrive before treating
+        # bootstrap/cache age as a hard reconnect (avoids budget burn loops).
+        live_since = monotonic()
+        stale_grace_seconds = 180
         while not stop.is_set() and fx_open(datetime.now(timezone.utc)):
             now = datetime.now(timezone.utc)
             if bars_stale(books, now):
-                cache.set(key+':status', 'stale_bars', ex=60)
-                raise CTraderUnavailable('Cached M1 bars went stale; reconnecting collector')
+                if monotonic() - live_since < stale_grace_seconds:
+                    cache.set(key+':status', 'waiting_live_bars', ex=60)
+                else:
+                    cache.set(key+':status', 'stale_bars', ex=60)
+                    raise CTraderUnavailable('Cached M1 bars went stale; reconnecting collector')
             if monotonic()-beat >= 9:
                 # Renew ownership BEFORE any outbound write, including heartbeat.
                 lock.extend(300, replace_ttl=True)
                 connection._write(ProtoHeartbeatEvent(), 'collector-heartbeat')
-                cache.set(key+':status', 'connected', ex=30)
+                if not bars_stale(books, now):
+                    cache.set(key+':status', 'connected', ex=30)
                 beat = monotonic()
             if connection._pending:
                 envelope = connection._pending.popleft()
@@ -242,6 +258,7 @@ def collect_session(settings, cache, stop, lock):
 
 def collector_loop(settings, cache, stop):
     key = prefix(settings)
+    failures = 0
     while not stop.is_set():
         if not settings.ctrader_network_enabled or not fx_open(datetime.now(timezone.utc)):
             stop.wait(10)
@@ -256,15 +273,17 @@ def collector_loop(settings, cache, stop):
                 continue
             collect_session(settings, cache, stop, lock)
         except Exception as exc:
+            failures += 1
             logging.error('Collector stopped: %s', exc)
             try:
                 cache.set(key+':status', 'error:'+type(exc).__name__, ex=300)
                 cache.delete(key+':tick')
             except Exception:
                 pass
-            delay = reconnect_delay(exc)
+            delay = reconnect_delay(exc, failures=failures)
         else:
             # Session ended cleanly (FX closed or stop). Recheck soon when FX reopens.
+            failures = 0
             delay = 30
         finally:
             if acquired:

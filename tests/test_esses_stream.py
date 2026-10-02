@@ -27,8 +27,53 @@ def test_reconnect_delay_is_fast_on_stale_and_slow_on_rate_limit():
     assert reconnect_delay(Exception('Cached M1 bars went stale; reconnecting')) == 60
     assert reconnect_delay(Exception('Cached M1 bars went stale; reconnecting'), failures=2) == 240
     assert reconnect_delay(Exception('rate limited by broker')) == 180
-    assert reconnect_delay(Exception('cTrader request budget exhausted; network blocked')) == 900
-    assert reconnect_delay(Exception('cTrader request budget unavailable; network blocked')) == 900
+    assert reconnect_delay(Exception('cTrader request budget exhausted; network blocked')) == 1800
+    assert reconnect_delay(Exception('budget_blocked: refusing history bootstrap')) == 1800
+
+
+def test_collector_window_only_around_esses_ny_session():
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+    from services.ctrader.stream import collector_window, active
+    ny = ZoneInfo('America/New_York')
+    # Friday 08:40 NY — before lead → closed
+    early = datetime(2026, 10, 2, 12, 40, tzinfo=timezone.utc)  # 08:40 EDT
+    assert early.astimezone(ny).hour == 8
+    assert collector_window(early) is False
+    # 08:45 NY — lead opens
+    lead = datetime(2026, 10, 2, 12, 45, tzinfo=timezone.utc)
+    assert collector_window(lead) is True
+    assert active(lead) is False
+    # 09:30 NY — Esses active
+    mid = datetime(2026, 10, 2, 13, 30, tzinfo=timezone.utc)
+    assert collector_window(mid) is True and active(mid) is True
+    # 11:15 NY — tail still open, Esses closed
+    tail = datetime(2026, 10, 2, 15, 15, tzinfo=timezone.utc)
+    assert collector_window(tail) is True
+    assert active(tail) is False
+    # 11:30 NY — closed
+    late = datetime(2026, 10, 2, 15, 30, tzinfo=timezone.utc)
+    assert collector_window(late) is False
+
+
+def test_budget_circuit_breaker_and_cheap_reconnect_path():
+    import inspect
+    from services.ctrader.stream import collect_session, collector_loop, budget_blocked
+    source = inspect.getsource(collect_session)
+    assert 'allow_history' in source
+    assert '_needs_history' in source
+    assert '_cached_bars' in source
+    assert 'collector_window' in source
+    loop = inspect.getsource(collector_loop)
+    assert 'budget_blocked' in loop
+    assert 'idle_outside_window' in loop
+    cache = Mock()
+    cache.zcard.return_value = 950
+    settings = Mock(ctrader_account_id='48803059', ctrader_requests_per_24h=1000)
+    blocked, used, limit = budget_blocked(cache, settings)
+    assert blocked is True and used == 950 and limit == 1000
+    cache.zcard.return_value = 100
+    assert budget_blocked(cache, settings)[0] is False
 
 
 def test_collector_loop_checks_stale_bars_and_reconnects():

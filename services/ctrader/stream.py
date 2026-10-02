@@ -20,6 +20,16 @@ from services.ctrader.feed import LiveCTraderFeed, PERIODS
 from services.ctrader.types import CTraderUnavailable, Tick, OhlcBar, SymbolInfo, spread_bps
 
 FRAMES = ('M1', 'M5', 'M15', 'H1', 'H4', 'D1')
+# Warm up before Esses (09:15) and a short tail after 11:10 NY.
+COLLECTOR_LEAD_MINUTES = 30
+COLLECTOR_TAIL_MINUTES = 10
+# Soft ceiling: above this ratio, reconnects never pull history (subscribe-only).
+BUDGET_HISTORY_RATIO = 0.70
+# Hard ceiling: above this, do not open a new collector session at all.
+BUDGET_BLOCK_RATIO = 0.90
+HISTORY_MAX_AGE = {
+    'M1': 300, 'M5': 900, 'M15': 1800, 'H1': 7200, 'H4': 18000, 'D1': 93600,
+}
 
 
 def prefix(settings):
@@ -29,6 +39,21 @@ def prefix(settings):
 def active(now):
     local = now.astimezone(ZoneInfo('America/New_York'))
     return local.weekday() < 5 and 555 <= local.hour*60+local.minute < 670
+
+
+def collector_window(now):
+    """Only run the cTrader collector around the Esses NY window.
+
+    Keeps the daily Open API budget for the session instead of burning it
+    overnight on reconnect/bootstrap loops.
+    """
+    local = now.astimezone(ZoneInfo('America/New_York'))
+    if local.weekday() >= 5:
+        return False
+    minutes = local.hour * 60 + local.minute
+    start = 555 - COLLECTOR_LEAD_MINUTES
+    end = 670 + COLLECTOR_TAIL_MINUTES
+    return start <= minutes < end
 
 
 def fx_open(now):
@@ -42,6 +67,39 @@ def fx_open(now):
     if weekday == 6 and minutes < 17 * 60:
         return False
     return True
+
+
+def budget_usage(cache, settings):
+    account = getattr(settings, 'ctrader_account_id', None)
+    limit = int(getattr(settings, 'ctrader_requests_per_24h', 1000) or 1000)
+    if not account or cache is None:
+        return 0, limit
+    try:
+        used = int(cache.zcard(f'ctrader:outbound:v1:{account}') or 0)
+    except Exception:
+        used = 0
+    return used, limit
+
+
+def budget_blocked(cache, settings):
+    used, limit = budget_usage(cache, settings)
+    return used >= int(limit * BUDGET_BLOCK_RATIO), used, limit
+
+
+def _bar_age_seconds(rows, now):
+    if not rows:
+        return None
+    last = rows[-1].closed_at
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    return (now - last).total_seconds()
+
+
+def _needs_history(rows, now, timeframe):
+    age = _bar_age_seconds(rows, now)
+    if age is None:
+        return True
+    return age > HISTORY_MAX_AGE.get(timeframe, 900)
 
 
 class CachedFeed:
@@ -182,8 +240,8 @@ def reconnect_delay(exc=None, *, failures=0):
     """
     msg = str(exc).lower() if exc is not None else ''
     failures = max(0, int(failures))
-    if 'budget exhausted' in msg or 'budget unavailable' in msg:
-        return 900
+    if 'budget exhausted' in msg or 'budget unavailable' in msg or 'budget_blocked' in msg:
+        return 1800
     if 'rate limited' in msg:
         return 180
     if 'stale' in msg:
@@ -195,20 +253,31 @@ def collect_session(settings, cache, stop, lock):
     if settings.ctrader_environment not in ('demo', 'live'):
         raise CTraderUnavailable('Esses collector requires a verified read-only source account')
     key = prefix(settings)
+    used, limit = budget_usage(cache, settings)
+    allow_history = used < int(limit * BUDGET_HISTORY_RATIO)
     cache.delete(key+':tick')
     with open_demo(settings, cache) as connection:
         feed = ConnectedFeed(settings, cache, connection)
         light = feed._find_symbol(connection, 'EURUSD')
         meta = feed.instrument('EURUSD')
         cache.set(key+':instrument', meta.model_dump_json(), ex=604800)
-        books = {tf: [] for tf in FRAMES}
+        books = {tf: _cached_bars(cache, key, tf) for tf in FRAMES}
+        # Cheap reconnect: reuse Redis history; only backfill frames that are
+        # missing/stale, and never when budget pressure is already high.
         for tf in FRAMES:
+            if not allow_history:
+                if not books[tf] and tf == 'M1':
+                    raise CTraderUnavailable(
+                        'budget_blocked: refusing history bootstrap with thin M1 cache')
+                continue
+            if not _needs_history(books[tf], datetime.now(timezone.utc), tf):
+                continue
             try:
                 books[tf] = feed.ohlc('EURUSD', tf, 40)
                 cache.set(key+':bars:'+tf, json.dumps([b.model_dump(mode='json') for b in books[tf]]), ex=604800)
             except CTraderUnavailable:
                 books[tf] = _cached_bars(cache, key, tf)
-                if not books[tf]:
+                if not books[tf] and tf == 'M1':
                     raise
             if stop.wait(0.8):
                 return
@@ -227,7 +296,7 @@ def collect_session(settings, cache, stop, lock):
         # bootstrap/cache age as a hard reconnect (avoids budget burn loops).
         live_since = monotonic()
         stale_grace_seconds = 180
-        while not stop.is_set() and fx_open(datetime.now(timezone.utc)):
+        while not stop.is_set() and collector_window(datetime.now(timezone.utc)):
             now = datetime.now(timezone.utc)
             if bars_stale(books, now):
                 if monotonic() - live_since < stale_grace_seconds:
@@ -260,8 +329,33 @@ def collector_loop(settings, cache, stop):
     key = prefix(settings)
     failures = 0
     while not stop.is_set():
-        if not settings.ctrader_network_enabled or not fx_open(datetime.now(timezone.utc)):
-            stop.wait(10)
+        now = datetime.now(timezone.utc)
+        if not settings.ctrader_network_enabled or not collector_window(now):
+            try:
+                cache.set(key+':status', 'idle_outside_window', ex=120)
+            except Exception:
+                pass
+            stop.wait(30)
+            continue
+        blocked, used, limit = budget_blocked(cache, settings)
+        if blocked:
+            try:
+                cache.set(key+':status', 'error:budget_exhausted', ex=300)
+            except Exception:
+                pass
+            logging.error(
+                'Collector paused: budget %s/%s (%.0f%%); refusing new session',
+                used, limit, (100.0 * used / max(limit, 1)))
+            try:
+                from services.ops.failure_log import record_failure_standalone
+                record_failure_standalone(
+                    kind='collector', code='budget_exhausted',
+                    message=f'Collector paused: budget {used}/{limit}',
+                    detail={'label': 'error:budget_exhausted', 'budget': used, 'source': 'circuit_breaker'},
+                )
+            except Exception:
+                pass
+            stop.wait(1800)
             continue
         lock = cache.lock(key+':owner', timeout=300, blocking=False)
         acquired = False
@@ -278,7 +372,7 @@ def collector_loop(settings, cache, stop):
             label = 'error:' + type(exc).__name__
             try:
                 msg = str(exc).lower()
-                if 'budget exhausted' in msg or 'budget unavailable' in msg:
+                if 'budget exhausted' in msg or 'budget unavailable' in msg or 'budget_blocked' in msg:
                     label = 'error:budget_exhausted'
                 elif 'stale' in msg:
                     label = 'stale_bars'
@@ -307,7 +401,7 @@ def collector_loop(settings, cache, stop):
             except Exception:
                 pass
         else:
-            # Session ended cleanly (FX closed or stop). Recheck soon when FX reopens.
+            # Session ended cleanly (window closed or stop).
             failures = 0
             delay = 30
         finally:

@@ -125,15 +125,52 @@ def test_health_digest_only_on_change_or_after_cooldown(monkeypatch):
     ])
     assert alerts.watch_worker_health(cfg, cache) == ['trader_health']
     assert len(sent) == 1
+    # Cooldown active — any flap stays silent.
     assert alerts.watch_worker_health(cfg, cache) == []
-    store.pop(alerts.ALERT_PREFIX + alerts.HEALTH_DIGEST_KIND)
+    monkeypatch.setattr(alerts, 'collect_health_issues', lambda s, c: [
+        ('collector_status', 'status=stale_bars'),
+    ])
     assert alerts.watch_worker_health(cfg, cache) == []
     monkeypatch.setattr(alerts, 'collect_health_issues', lambda s, c: [
         ('collector_budget', 'budget=1000'),
+        ('prop_sim_preflight', 'missing'),
     ])
+    assert alerts.watch_worker_health(cfg, cache) == []
+    assert len(sent) == 1
+    # After cooldown expires, one reminder is allowed.
+    store.pop(alerts.ALERT_PREFIX + alerts.HEALTH_DIGEST_KIND)
     assert alerts.watch_worker_health(cfg, cache) == ['trader_health']
     assert len(sent) == 2
-    assert alerts.watch_worker_health(cfg, cache) == []
+
+
+def test_collect_health_decodes_redis_bytes():
+    cfg = base_settings(
+        trading_mode='prop-sim',
+        prop_sim_execution_enabled=True,
+        prop_sim_acknowledged_live_environment=True,
+        prop_sim_ctrader_account_id='48803059',
+        prop_sim_trader_login='17204978',
+        esses_broker_execution=True,
+        ctrader_environment='live',
+        ctrader_account_id='48803059',
+        discord_bot_enabled=True,
+        discord_bot_token='b' * 40,
+        discord_api_key='d' * 40,
+        discord_guild_id=1,
+        discord_admin_role_id=2,
+        discord_channel_id=3,
+        discord_allowed_user_ids='9',
+    )
+    cache = Mock()
+    cache.get.side_effect = lambda k: {
+        'ctrader:stream:v1:live:48803059:status': b'stale_bars',
+        'paper:last_error': b'CTraderUnavailable',
+        'prop-sim:preflight:ok': b'1',
+    }.get(k)
+    cache.zcard.return_value = 10
+    issues = alerts.collect_health_issues(cfg, cache)
+    assert issues == [('collector_status', 'status=stale_bars')]
+    assert not any(c == 'prop_sim_preflight' for c, _ in issues)
 
 
 def test_ops_alert_queues_when_rest_blocked(monkeypatch):

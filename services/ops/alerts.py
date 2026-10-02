@@ -23,6 +23,14 @@ def alerts_enabled(settings):
     )
 
 
+def _as_text(value):
+    if value is None:
+        return ''
+    if isinstance(value, bytes):
+        return value.decode('utf-8', errors='replace')
+    return str(value)
+
+
 def _mark_cooldown(cache, key, seconds):
     try:
         cache.set(key, datetime.now(timezone.utc).isoformat(), ex=int(seconds))
@@ -52,7 +60,7 @@ def due_alerts(cache, *, limit=10):
         if not raw:
             break
         try:
-            rows.append(json.loads(raw))
+            rows.append(json.loads(_as_text(raw)))
         except (TypeError, json.JSONDecodeError):
             continue
     return rows
@@ -108,14 +116,15 @@ def collect_health_issues(settings, cache):
     issues = []
     key = prefix(settings)
     try:
-        status = cache.get(key + ':status') or ''
-        last_err = cache.get('paper:last_error')
-        prop_ok = cache.get('prop-sim:preflight:ok')
+        status = _as_text(cache.get(key + ':status'))
+        last_err = _as_text(cache.get('paper:last_error'))
+        prop_ok = _as_text(cache.get('prop-sim:preflight:ok'))
         budget = cache.zcard(f'ctrader:outbound:v1:{settings.ctrader_account_id}') if settings.ctrader_account_id else 0
+        if isinstance(budget, bytes):
+            budget = int(budget)
     except Exception:
         return issues
 
-    status = status if isinstance(status, str) else str(status)
     budget_full = isinstance(budget, int) and budget >= getattr(settings, 'ctrader_requests_per_24h', 1000)
     if 'budget' in status.lower() or budget_full:
         issues.append(('collector_budget', f'status={status or "missing"} budget={budget}'))
@@ -124,7 +133,7 @@ def collect_health_issues(settings, cache):
 
     # Paper error is usually a symptom of collector/cache — skip duplicate noise.
     if last_err and last_err not in ('None', '') and not any(c.startswith('collector_') for c, _ in issues):
-        issues.append(('paper_error', str(last_err)))
+        issues.append(('paper_error', last_err))
 
     if getattr(settings, 'trading_mode', '') == 'prop-sim' and prop_ok != '1':
         issues.append(('prop_sim_preflight', 'prop-sim:preflight:ok missing'))
@@ -132,12 +141,13 @@ def collect_health_issues(settings, cache):
     return issues
 
 
-def _health_signature(issues):
-    return '|'.join(f'{code}:{detail}' for code, detail in issues)
+def _health_codes(issues):
+    """Codes only — ignore volatile detail text so flaps do not re-alert."""
+    return tuple(sorted({code for code, _ in issues}))
 
 
 def watch_worker_health(settings, cache):
-    """One digest alert when health changes, then at most every 6h if unchanged."""
+    """At most one digest every 6h while unhealthy. No spam on status flaps."""
     if cache is None or not alerts_enabled(settings):
         return []
     issues = collect_health_issues(settings, cache)
@@ -148,17 +158,14 @@ def watch_worker_health(settings, cache):
             pass
         return []
 
-    signature = _health_signature(issues)
     digest_key = ALERT_PREFIX + HEALTH_DIGEST_KIND
     try:
-        prev = cache.get(HEALTH_SIGNATURE_KEY)
-        if prev == signature:
+        if cache.get(digest_key):
             return []
-        if prev is not None and prev != signature:
-            cache.delete(digest_key)
     except Exception:
         pass
 
+    signature = '|'.join(_health_codes(issues))
     lines = ['Estado del trader (paper/prop-sim):']
     for code, detail in issues:
         lines.append(f'- `{code}`: {detail}')

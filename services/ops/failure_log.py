@@ -1,5 +1,8 @@
 """Durable, deduped ops failure log. Never stores secrets or raw tokens."""
 import logging
+import re
+import sys
+import threading
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
@@ -10,11 +13,21 @@ DEDUPE_SECONDS = 900  # merge identical kind+code within 15 minutes
 SAFE_DETAIL_KEYS = frozenset({
     'status', 'budget', 'failures', 'label', 'exc_type', 'trading_mode',
     'paper_strategy', 'reason', 'approved', 'confidence', 'model', 'source',
+    'where', 'mode', 'component', 'thread', 'rollout',
 })
+_SECRET_RE = re.compile(
+    r'(?i)(bearer\s+\S+|sk-[A-Za-z0-9_-]{8,}|(?:api[_-]?key|token|secret|password)\s*[:=]\s*\S+)'
+)
 
 
 def _utcnow():
     return datetime.now(timezone.utc)
+
+
+def scrub_text(value, *, limit=500):
+    text = '' if value is None else str(value)
+    text = _SECRET_RE.sub('[redacted]', text)
+    return text[:limit]
 
 
 def _clean_detail(detail):
@@ -26,15 +39,17 @@ def _clean_detail(detail):
             continue
         if value is None:
             continue
-        text = value if isinstance(value, (int, float, bool)) else str(value)[:200]
-        out[str(key)[:64]] = text
+        if isinstance(value, (int, float, bool)):
+            out[str(key)[:64]] = value
+        else:
+            out[str(key)[:64]] = scrub_text(value, limit=200)
     return out
 
 
 def _normalize(kind, code, message):
     kind = str(kind or 'ops')[:64]
     code = str(code or 'unknown')[:64]
-    message = str(message or code)[:500]
+    message = scrub_text(message or code, limit=500)
     return kind, code, message
 
 
@@ -85,6 +100,58 @@ def record_failure_standalone(*, kind, code, message, detail=None):
     except Exception:
         logging.error('Ops failure log write failed: %s/%s', kind, code, exc_info=False)
         return None
+
+
+def capture_exception(kind, exc, *, detail=None, code=None, message=None):
+    """Record any exception safely. Never raises to callers."""
+    if exc is None:
+        return None
+    detail = dict(detail or {})
+    detail.setdefault('exc_type', type(exc).__name__)
+    detail.setdefault('where', kind)
+    return record_failure_standalone(
+        kind=kind,
+        code=code or type(exc).__name__,
+        message=message or scrub_text(exc, limit=300),
+        detail=detail,
+    )
+
+
+def install_process_hooks(kind_prefix='worker'):
+    """Capture uncaught exceptions in the main thread and worker threads."""
+    previous = sys.excepthook
+
+    def _hook(exc_type, exc, tb):
+        try:
+            capture_exception(
+                f'{kind_prefix}.uncaught',
+                exc if isinstance(exc, BaseException) else exc_type('unknown'),
+                detail={'source': 'sys.excepthook', 'thread': 'main'},
+            )
+        except Exception:
+            pass
+        return previous(exc_type, exc, tb)
+
+    sys.excepthook = _hook
+
+    if hasattr(threading, 'excepthook'):
+        previous_thread = threading.excepthook
+
+        def _thread_hook(args):
+            try:
+                capture_exception(
+                    f'{kind_prefix}.thread',
+                    args.exc_value,
+                    detail={
+                        'source': 'threading.excepthook',
+                        'thread': getattr(args.thread, 'name', 'unknown'),
+                    },
+                )
+            except Exception:
+                pass
+            return previous_thread(args)
+
+        threading.excepthook = _thread_hook
 
 
 def list_failures(session, *, limit=50, unresolved_only=True):

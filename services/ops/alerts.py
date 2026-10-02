@@ -97,11 +97,21 @@ def notify(settings, cache, *, kind, message, cooldown_seconds=DEFAULT_COOLDOWN_
         return True
     except ProviderError as exc:
         logging.error('Ops Discord REST failed: %s; queueing for bot', type(exc).__name__)
+        try:
+            from services.ops.failure_log import capture_exception
+            capture_exception('discord.rest', exc, detail={'source': 'ops_notify', 'where': kind})
+        except Exception:
+            pass
         queued = _enqueue(cache, kind, message, settings.discord_channel_id)
         _mark_cooldown(cache, key, int(cooldown_seconds) if queued else 3600)
         return queued
-    except Exception:
+    except Exception as exc:
         logging.error('Ops Discord alert failed', exc_info=False)
+        try:
+            from services.ops.failure_log import capture_exception
+            capture_exception('discord.alert', exc, detail={'source': 'ops_notify', 'where': kind})
+        except Exception:
+            pass
         queued = _enqueue(cache, kind, message, settings.discord_channel_id)
         _mark_cooldown(cache, key, 3600)
         return queued

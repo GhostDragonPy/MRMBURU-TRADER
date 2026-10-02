@@ -59,11 +59,11 @@ def apply_ai_filter(settings, signal, audit, tick, cache=None):
         except Exception:
             pass
         try:
-            from services.ops.failure_log import record_failure_standalone
-            record_failure_standalone(
-                kind='ai_filter', code='deepseek_unavailable',
+            from services.ops.failure_log import capture_exception
+            capture_exception(
+                'ai_filter', exc, code='deepseek_unavailable',
                 message='DeepSeek review unavailable; Esses fail-open',
-                detail={'exc_type': type(exc).__name__, 'source': 'esses'},
+                detail={'source': 'esses'},
             )
         except Exception:
             pass

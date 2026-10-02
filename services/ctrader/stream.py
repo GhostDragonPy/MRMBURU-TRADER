@@ -290,7 +290,7 @@ def collector_loop(settings, cache, stop):
                 pass
             delay = reconnect_delay(exc, failures=failures)
             try:
-                from services.ops.failure_log import record_failure_standalone
+                from services.ops.failure_log import capture_exception
                 msg = str(exc)
                 if 'budget' in label:
                     code = 'budget_exhausted'
@@ -300,10 +300,9 @@ def collector_loop(settings, cache, stop):
                     code = 'rate_limited'
                 else:
                     code = type(exc).__name__
-                record_failure_standalone(
-                    kind='collector', code=code,
-                    message=msg[:300],
-                    detail={'label': label, 'failures': failures, 'exc_type': type(exc).__name__},
+                capture_exception(
+                    'collector', exc, code=code, message=msg[:300],
+                    detail={'label': label, 'failures': failures, 'source': 'collector_loop'},
                 )
             except Exception:
                 pass

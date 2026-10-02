@@ -30,7 +30,18 @@ def test_record_failure_dedupes_within_window(factory):
         assert session.get(OpsFailure, c).occurrences == 1
 
 
-def test_list_and_resolve_failures(factory):
+def test_capture_exception_scrubs_secrets(factory):
+    with factory.begin() as session:
+        rid = failure_log.record_failure(
+            session, kind='unit', code='Boom',
+            message='token=abc123secret and Bearer xyz sk-abcdefghijklmnop',
+            detail={'source': 'test', 'where': 'unit', 'token': 'should-drop'})
+        row = session.get(OpsFailure, rid)
+        assert '[redacted]' in row.message
+        assert 'sk-abcdefghijklmnop' not in row.message
+        assert 'token' not in (row.detail or {})
+        assert failure_log.scrub_text('Authorization: Bearer supersecret') == 'Authorization: [redacted]'
+
     with factory.begin() as session:
         failure_log.record_failure(
             session, kind='paper_cycle', code='CTraderUnavailable',

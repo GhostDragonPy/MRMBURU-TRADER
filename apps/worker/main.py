@@ -16,41 +16,52 @@ def maintain_broker_socket(settings, factory, cache, demo_sdk):
     if mode not in ('demo-orders', 'prop-sim'):
         return
     import json as json_lib
-    with factory.begin() as session:
-        if mode == 'demo-orders':
-            from services.demo_orders.factory import open_shadow_session
-            from services.demo_orders.service import control
-            key = 'demo:socket'
-            ok_key = 'demo:preflight:ok'
-        else:
-            from services.prop_sim_orders.factory import open_shadow_session
-            from services.prop_sim_orders.service import control
-            key = 'prop-sim:socket'
-            ok_key = 'prop-sim:preflight:ok'
-        demo = control(session)
-        if demo.rollout not in ('shadow', 'canary', 'enabled'):
-            return
-        sess = demo_sdk.get('session')
-        if sess is None or not getattr(sess, 'healthy', False):
-            try:
-                sess = open_shadow_session(settings, cache, demo=demo)
-                demo_sdk['session'] = sess
-            except Exception as exc:
-                logging.error('%s socket unavailable: %s', mode, type(exc).__name__)
+    try:
+        with factory.begin() as session:
+            if mode == 'demo-orders':
+                from services.demo_orders.factory import open_shadow_session
+                from services.demo_orders.service import control
+                key = 'demo:socket'
+                ok_key = 'demo:preflight:ok'
+            else:
+                from services.prop_sim_orders.factory import open_shadow_session
+                from services.prop_sim_orders.service import control
+                key = 'prop-sim:socket'
+                ok_key = 'prop-sim:preflight:ok'
+            demo = control(session)
+            if demo.rollout not in ('shadow', 'canary', 'enabled'):
                 return
-        if sess is not None:
-            cache.set(key, json_lib.dumps(sess.snapshot_status()))
-            if sess.trading_permission == 'VERIFIED':
-                cache.set(ok_key, '1', ex=3600)
-                if mode == 'prop-sim':
-                    try:
-                        from services.prop_sim_orders.preflight import renew_preflight_if_needed
-                        if renew_preflight_if_needed(
-                                session, settings,
-                                trading_permission=sess.trading_permission):
-                            logging.info('PROP SIM preflight renewed')
-                    except Exception as exc:
-                        logging.error('PROP SIM preflight renew failed: %s', type(exc).__name__)
+            sess = demo_sdk.get('session')
+            if sess is None or not getattr(sess, 'healthy', False):
+                try:
+                    sess = open_shadow_session(settings, cache, demo=demo)
+                    demo_sdk['session'] = sess
+                except Exception as exc:
+                    logging.error('%s socket unavailable: %s', mode, type(exc).__name__)
+                    from services.ops.failure_log import capture_exception
+                    capture_exception(
+                        f'{mode}.socket', exc,
+                        detail={'mode': mode, 'rollout': getattr(demo, 'rollout', None)})
+                    return
+            if sess is not None:
+                cache.set(key, json_lib.dumps(sess.snapshot_status()))
+                if sess.trading_permission == 'VERIFIED':
+                    cache.set(ok_key, '1', ex=3600)
+                    if mode == 'prop-sim':
+                        try:
+                            from services.prop_sim_orders.preflight import renew_preflight_if_needed
+                            if renew_preflight_if_needed(
+                                    session, settings,
+                                    trading_permission=sess.trading_permission):
+                                logging.info('PROP SIM preflight renewed')
+                        except Exception as exc:
+                            logging.error('PROP SIM preflight renew failed: %s', type(exc).__name__)
+                            from services.ops.failure_log import capture_exception
+                            capture_exception('prop-sim.preflight_renew', exc, detail={'mode': mode})
+    except Exception as exc:
+        from services.ops.failure_log import capture_exception
+        capture_exception('broker_socket', exc, detail={'mode': mode})
+        logging.error('Broker socket maintenance failed: %s', type(exc).__name__)
 
 
 def paper_loop(settings, factory, cache, stop, demo_sdk=None):
@@ -92,6 +103,8 @@ def paper_loop(settings, factory, cache, stop, demo_sdk=None):
                                     demo_sdk['session'] = sess
                                 except Exception as exc:
                                     logging.error('DEMO socket unavailable: %s', type(exc).__name__)
+                                    from services.ops.failure_log import capture_exception
+                                    capture_exception('demo-orders.socket', exc, detail={'mode': 'demo-orders'})
                                     sess = None
                             if sess is not None:
                                 cache.set('demo:socket', json_lib.dumps(sess.snapshot_status()))
@@ -118,6 +131,8 @@ def paper_loop(settings, factory, cache, stop, demo_sdk=None):
                                     demo_sdk['session'] = sess
                                 except Exception as exc:
                                     logging.error('PROP SIM socket unavailable: %s', type(exc).__name__)
+                                    from services.ops.failure_log import capture_exception
+                                    capture_exception('prop-sim.socket', exc, detail={'mode': 'prop-sim'})
                                     sess = None
                             if sess is not None:
                                 cache.set('prop-sim:socket', json_lib.dumps(sess.snapshot_status()))
@@ -142,14 +157,14 @@ def paper_loop(settings, factory, cache, stop, demo_sdk=None):
                 pass
             logging.error('Paper cycle failed: %s; no new fills committed', type(exc).__name__)
             try:
-                from services.ops.failure_log import record_failure_standalone
-                record_failure_standalone(
-                    kind='paper_cycle', code=type(exc).__name__,
-                    message=f'Paper cycle failed: {type(exc).__name__}',
+                from services.ops.failure_log import capture_exception
+                capture_exception(
+                    'paper_cycle', exc,
                     detail={
                         'exc_type': type(exc).__name__,
                         'trading_mode': getattr(settings, 'trading_mode', None),
                         'paper_strategy': getattr(settings, 'paper_strategy', None),
+                        'source': 'paper_loop',
                     },
                 )
             except Exception:
@@ -160,6 +175,11 @@ def paper_loop(settings, factory, cache, stop, demo_sdk=None):
 
 def main():
     settings=get_settings(); factory=session_factory()
+    try:
+        from services.ops.failure_log import install_process_hooks
+        install_process_hooks('worker')
+    except Exception:
+        logging.error('Ops failure hooks unavailable', exc_info=False)
     cache=Redis.from_url(settings.redis_url,socket_connect_timeout=3,socket_timeout=3)
     stop=Event()
     signal.signal(signal.SIGTERM,lambda *_:stop.set())
@@ -169,10 +189,10 @@ def main():
     demo_sdk = {'session': None}
     if settings.ctrader_network_enabled and settings.ctrader_cached_feed:
         from services.ctrader.stream import collector_loop
-        collector = Thread(target=collector_loop, args=(settings, cache, stop), daemon=True)
+        collector = Thread(target=collector_loop, args=(settings, cache, stop), daemon=True, name='ctrader-collector')
         collector.start()
     if settings.paper_scheduler_enabled:
-        task = Thread(target=paper_loop, args=(settings, factory, cache, stop, demo_sdk), daemon=True)
+        task = Thread(target=paper_loop, args=(settings, factory, cache, stop, demo_sdk), daemon=True, name='paper-loop')
         task.start()
     while not stop.is_set():
         try:
@@ -181,10 +201,17 @@ def main():
             try:
                 from services.ops.alerts import watch_worker_health
                 watch_worker_health(settings, cache)
-            except Exception:
+            except Exception as exc:
                 logging.error('Ops health watch failed', exc_info=False)
-        except Exception:
+                from services.ops.failure_log import capture_exception
+                capture_exception('ops.health_watch', exc, detail={'source': 'main_loop'})
+        except Exception as exc:
             logging.error('Worker dependencies unavailable; execution disabled')
+            try:
+                from services.ops.failure_log import capture_exception
+                capture_exception('worker.dependencies', exc, detail={'source': 'main_loop'})
+            except Exception:
+                pass
         stop.wait(10)
     if task:
         task.join(timeout=5)

@@ -113,7 +113,26 @@ def create_app(settings=None, factory=None, redis_client=None):
 
     @app.exception_handler(CTraderUnavailable)
     async def ctrader_unavailable(_, exc):
+        try:
+            from services.ops.failure_log import capture_exception
+            capture_exception('api.ctrader', exc, detail={'source': 'api'})
+        except Exception:
+            pass
         return JSONResponse(status_code=503, content={'detail': str(exc)})
+
+    @app.exception_handler(Exception)
+    async def unhandled_api_error(_, exc):
+        # Let FastAPI/Starlette keep their own HTTPException handling above this
+        # only when not already an HTTPException.
+        from fastapi import HTTPException as FastAPIHTTPException
+        if isinstance(exc, FastAPIHTTPException):
+            return JSONResponse(status_code=exc.status_code, content={'detail': exc.detail})
+        try:
+            from services.ops.failure_log import capture_exception
+            capture_exception('api.unhandled', exc, detail={'source': 'api'})
+        except Exception:
+            pass
+        return JSONResponse(status_code=500, content={'detail': 'Internal server error'})
 
     def admin(x_api_key: str = Header(default='')):
         if not compare_digest(x_api_key, settings.admin_api_key.get_secret_value()):

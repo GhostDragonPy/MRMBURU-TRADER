@@ -1,6 +1,4 @@
 from datetime import datetime, timedelta, timezone
-from unittest.mock import Mock
-import pytest
 from core.models import OpsFailure
 from services.ops import failure_log
 from tests.test_providers import settings as base_settings
@@ -42,6 +40,8 @@ def test_capture_exception_scrubs_secrets(factory):
         assert 'token' not in (row.detail or {})
         assert failure_log.scrub_text('Authorization: Bearer supersecret') == 'Authorization: [redacted]'
 
+
+def test_list_and_resolve_failures(factory):
     with factory.begin() as session:
         failure_log.record_failure(
             session, kind='paper_cycle', code='CTraderUnavailable',

@@ -95,6 +95,17 @@ class PaperRunRequest(Contract):
     include_ai: bool = False
 
 
+class MarketBusIngest(Contract):
+    """Bridge payload for MT5 / external publishers (no broker install on the VPS)."""
+    source: str = Field(default='mt5', min_length=2, max_length=16)
+    symbol: str = Field(default='EURUSD', min_length=1, max_length=32)
+    status: str | None = Field(default=None, max_length=64)
+    tick: dict | None = None
+    instrument: dict | None = None
+    bars: dict | None = None
+    mirror_legacy: bool = True
+
+
 def create_app(settings=None, factory=None, redis_client=None):
     settings = settings or get_settings()
     factory = factory or session_factory()
@@ -256,12 +267,46 @@ def create_app(settings=None, factory=None, redis_client=None):
 
     @app.get('/research/providers', dependencies=[Depends(research)])
     def providers():
+        from services.market_data import bus as market_bus
         return {
             'ai': {'provider': 'deepseek', 'configured': deepseek.configured(settings), 'role': 'advisory'},
             'macro': {'provider': 'fred', 'configured': fred.configured(settings), 'prices': False},
             'market_data': ctrader.status(settings, redis_client),
+            'market_bus': {
+                'contract': market_bus.BUS_PREFIX,
+                'symbols': market_bus.list_symbols(redis_client),
+                'sources': sorted(market_bus.SOURCES),
+                'role': 'external_or_mt5_prices',
+            },
             'execution_enabled': False,
             'paper_pipeline': ['ctrader', 'strategy', 'risk', 'paper_fill', 'journal'],
+        }
+
+    @app.post('/research/market-bus/ingest', dependencies=[Depends(admin)])
+    def market_bus_ingest(body: MarketBusIngest):
+        from services.market_data import bus as market_bus
+        try:
+            published = market_bus.ingest_payload(
+                redis_client,
+                body.model_dump(mode='python'),
+                settings=settings,
+                mirror_legacy=bool(body.mirror_legacy),
+            )
+        except (ValueError, KeyError, TypeError) as exc:
+            raise HTTPException(422, str(exc)) from None
+        return {'ok': True, 'published': published}
+
+    @app.get('/research/market-bus/status', dependencies=[Depends(research)])
+    def market_bus_status(symbol: str = 'EURUSD'):
+        from services.market_data.redis_feed import feed_status
+        return feed_status(redis_client, symbol)
+
+    @app.get('/research/market-bus/symbols', dependencies=[Depends(research)])
+    def market_bus_symbols():
+        from services.market_data import bus as market_bus
+        return {
+            'contract': market_bus.BUS_PREFIX,
+            'symbols': market_bus.list_symbols(redis_client),
         }
 
     @app.get('/research/ai/health', dependencies=[Depends(research)])

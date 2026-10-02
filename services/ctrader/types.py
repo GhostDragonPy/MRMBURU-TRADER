@@ -11,7 +11,7 @@ class Tick(Contract):
     ask: Positive
     spread_bps: NonNegative
     as_of: datetime
-    source: Literal['ctrader'] = 'ctrader'
+    source: Literal['ctrader', 'mt5', 'external'] = 'ctrader'
 
     @property
     def mid(self):
@@ -27,7 +27,7 @@ class OhlcBar(Contract):
     close: Positive
     volume: NonNegative = Decimal('0')
     closed_at: datetime
-    source: Literal['ctrader'] = 'ctrader'
+    source: Literal['ctrader', 'mt5', 'external'] = 'ctrader'
 
 
 class SymbolInfo(Contract):
@@ -55,7 +55,7 @@ class AccountSnapshot(Contract):
     currency: str = Field(min_length=3, max_length=3)
     as_of: datetime
     positions: tuple[Position, ...] = ()
-    source: Literal['ctrader'] = 'ctrader'
+    source: Literal['ctrader', 'mt5', 'external'] = 'ctrader'
 
 
 class CTraderAuthRequired(RuntimeError):

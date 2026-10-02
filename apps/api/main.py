@@ -180,6 +180,22 @@ def create_app(settings=None, factory=None, redis_client=None):
             'ctrader_authorized': bool(ctrader.access_token(settings, redis_client)),
         }
 
+    @app.get('/ops/failures', dependencies=[Depends(research)])
+    def ops_failures(limit: int = 50, unresolved: bool = True, s=Depends(db)):
+        from services.ops.failure_log import list_failures
+        return {
+            'failures': list_failures(s, limit=limit, unresolved_only=unresolved),
+            'unresolved_only': unresolved,
+        }
+
+    @app.post('/ops/failures/{failure_id}/resolve', dependencies=[Depends(admin)])
+    def ops_resolve_failure(failure_id: str, s=Depends(db)):
+        from services.ops.failure_log import resolve_failure
+        row = resolve_failure(s, failure_id)
+        if row is None:
+            raise HTTPException(404, 'Failure not found')
+        return row
+
     @app.post('/accounts', dependencies=[Depends(admin)], status_code=201)
     def add_account(body:CreateAccount,s=Depends(db)):
         try: ZoneInfo(body.prop_rules.timezone)

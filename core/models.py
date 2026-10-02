@@ -312,3 +312,17 @@ class ImprovementProposal(Base):
     status = Column(String(32), nullable=False, default='proposed')
     approved_by = Column(String(128), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+
+class OpsFailure(Base):
+    """Durable ops failure log for patching recurring infra/strategy faults."""
+    __tablename__ = 'ops_failures'
+    id = Column(String(36), primary_key=True, default=uid)
+    kind = Column(String(64), nullable=False, index=True)
+    code = Column(String(64), nullable=False, index=True)
+    message = Column(Text, nullable=False)
+    detail = Column(JSON, nullable=False, default=dict)
+    occurrences = Column(Integer, nullable=False, default=1)
+    first_seen_at = Column(DateTime(timezone=True), nullable=False, default=utcnow, index=True)
+    last_seen_at = Column(DateTime(timezone=True), nullable=False, default=utcnow, index=True)
+    resolved_at = Column(DateTime(timezone=True), nullable=True, index=True)

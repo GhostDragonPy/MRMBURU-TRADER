@@ -58,6 +58,15 @@ def apply_ai_filter(settings, signal, audit, tick, cache=None):
                    message='DeepSeek no respondió; Esses sigue sin filtro IA (fail-open).')
         except Exception:
             pass
+        try:
+            from services.ops.failure_log import record_failure_standalone
+            record_failure_standalone(
+                kind='ai_filter', code='deepseek_unavailable',
+                message='DeepSeek review unavailable; Esses fail-open',
+                detail={'exc_type': type(exc).__name__, 'source': 'esses'},
+            )
+        except Exception:
+            pass
     audit = dict(audit or {})
     audit['ai_filter'] = review
     if review.get('approved') is False:

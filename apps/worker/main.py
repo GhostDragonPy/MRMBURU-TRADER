@@ -141,6 +141,19 @@ def paper_loop(settings, factory, cache, stop, demo_sdk=None):
             except Exception:
                 pass
             logging.error('Paper cycle failed: %s; no new fills committed', type(exc).__name__)
+            try:
+                from services.ops.failure_log import record_failure_standalone
+                record_failure_standalone(
+                    kind='paper_cycle', code=type(exc).__name__,
+                    message=f'Paper cycle failed: {type(exc).__name__}',
+                    detail={
+                        'exc_type': type(exc).__name__,
+                        'trading_mode': getattr(settings, 'trading_mode', None),
+                        'paper_strategy': getattr(settings, 'paper_strategy', None),
+                    },
+                )
+            except Exception:
+                pass
             stop.wait(10)
         stop.wait(1 if getattr(settings, 'paper_strategy', 'sma') == 'esses-v1' else 10)
 

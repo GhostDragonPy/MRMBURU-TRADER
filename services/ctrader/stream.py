@@ -289,6 +289,24 @@ def collector_loop(settings, cache, stop):
             except Exception:
                 pass
             delay = reconnect_delay(exc, failures=failures)
+            try:
+                from services.ops.failure_log import record_failure_standalone
+                msg = str(exc)
+                if 'budget' in label:
+                    code = 'budget_exhausted'
+                elif label == 'stale_bars':
+                    code = 'stale_bars'
+                elif 'rate_limited' in label:
+                    code = 'rate_limited'
+                else:
+                    code = type(exc).__name__
+                record_failure_standalone(
+                    kind='collector', code=code,
+                    message=msg[:300],
+                    detail={'label': label, 'failures': failures, 'exc_type': type(exc).__name__},
+                )
+            except Exception:
+                pass
         else:
             # Session ended cleanly (FX closed or stop). Recheck soon when FX reopens.
             failures = 0

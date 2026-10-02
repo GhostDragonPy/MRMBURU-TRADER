@@ -177,4 +177,14 @@ def watch_worker_health(settings, cache):
         cache.set(HEALTH_SIGNATURE_KEY, signature)
     except Exception:
         pass
+    try:
+        from services.ops.failure_log import record_failure_standalone
+        for code, detail in issues:
+            record_failure_standalone(
+                kind='health', code=code,
+                message=f'Health digest: {code}',
+                detail={'status': detail, 'source': 'watch_worker_health'},
+            )
+    except Exception:
+        pass
     return [HEALTH_DIGEST_KIND]

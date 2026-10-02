@@ -289,16 +289,6 @@ def collector_loop(settings, cache, stop):
             except Exception:
                 pass
             delay = reconnect_delay(exc, failures=failures)
-            try:
-                from services.ops.alerts import notify
-                if 'budget' in label:
-                    notify(settings, cache, kind='collector_budget',
-                           message='Collector: presupuesto cTrader agotado. Backoff 15 min.')
-                elif label == 'stale_bars' and failures >= 3:
-                    notify(settings, cache, kind='collector_stale',
-                           message=f'Collector: M1 stale repetido (fallos={failures}).')
-            except Exception:
-                pass
         else:
             # Session ended cleanly (FX closed or stop). Recheck soon when FX reopens.
             failures = 0

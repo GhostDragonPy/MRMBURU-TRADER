@@ -7,7 +7,9 @@ from services.providers.http import ProviderError, request_json
 
 ALERT_PREFIX = 'ops:alert:v1:'
 ALERT_QUEUE = 'discord:ops_alerts'
-DEFAULT_COOLDOWN_SECONDS = 1800
+HEALTH_SIGNATURE_KEY = 'ops:alert:v1:health:signature'
+HEALTH_DIGEST_KIND = 'trader_health'
+DEFAULT_COOLDOWN_SECONDS = 21600  # 6h: chronic infra issues should not ping hourly
 DISCORD_USER_AGENT = 'MRMBURU-Trader-Ops (https://trader.acshop.shop, 1.0)'
 
 
@@ -88,23 +90,22 @@ def notify(settings, cache, *, kind, message, cooldown_seconds=DEFAULT_COOLDOWN_
     except ProviderError as exc:
         logging.error('Ops Discord REST failed: %s; queueing for bot', type(exc).__name__)
         queued = _enqueue(cache, kind, message, settings.discord_channel_id)
-        # Cooldown even on failure so the worker does not hammer Discord/queue.
-        _mark_cooldown(cache, key, min(int(cooldown_seconds), 300) if not queued else cooldown_seconds)
+        _mark_cooldown(cache, key, int(cooldown_seconds) if queued else 3600)
         return queued
     except Exception:
         logging.error('Ops Discord alert failed', exc_info=False)
         queued = _enqueue(cache, kind, message, settings.discord_channel_id)
-        _mark_cooldown(cache, key, 300)
+        _mark_cooldown(cache, key, 3600)
         return queued
 
 
-def watch_worker_health(settings, cache):
-    """Inspect Redis health keys and alert on actionable failures."""
-    if cache is None or not alerts_enabled(settings):
+def collect_health_issues(settings, cache):
+    """Return stable (code, detail) tuples for current infra problems."""
+    if cache is None:
         return []
     from services.ctrader.stream import prefix
 
-    sent = []
+    issues = []
     key = prefix(settings)
     try:
         status = cache.get(key + ':status') or ''
@@ -112,27 +113,61 @@ def watch_worker_health(settings, cache):
         prop_ok = cache.get('prop-sim:preflight:ok')
         budget = cache.zcard(f'ctrader:outbound:v1:{settings.ctrader_account_id}') if settings.ctrader_account_id else 0
     except Exception:
-        return sent
+        return issues
 
     status = status if isinstance(status, str) else str(status)
-    if 'budget' in status.lower() or (isinstance(budget, int) and budget >= getattr(settings, 'ctrader_requests_per_24h', 1000)):
-        if notify(settings, cache, kind='collector_budget',
-                  message=f'Presupuesto cTrader agotado o bloqueado (`{status or budget}`). '
-                          'Esses no tendrá velas hasta que libere cupo.'):
-            sent.append('collector_budget')
+    budget_full = isinstance(budget, int) and budget >= getattr(settings, 'ctrader_requests_per_24h', 1000)
+    if 'budget' in status.lower() or budget_full:
+        issues.append(('collector_budget', f'status={status or "missing"} budget={budget}'))
     elif status.startswith('error:') or status in ('stale_bars', 'waiting_live_bars'):
-        if notify(settings, cache, kind='collector_status',
-                  message=f'Collector enfermo: `{status}`. Sin M1 fresco no hay entradas Esses.'):
-            sent.append('collector_status')
+        issues.append(('collector_status', f'status={status}'))
 
-    if last_err and last_err not in ('None', ''):
-        if notify(settings, cache, kind='paper_error',
-                  message=f'Último error del paper cycle: `{last_err}`.'):
-            sent.append('paper_error')
+    # Paper error is usually a symptom of collector/cache — skip duplicate noise.
+    if last_err and last_err not in ('None', '') and not any(c.startswith('collector_') for c, _ in issues):
+        issues.append(('paper_error', str(last_err)))
 
     if getattr(settings, 'trading_mode', '') == 'prop-sim' and prop_ok != '1':
-        if notify(settings, cache, kind='prop_sim_preflight',
-                  message='Preflight prop-sim no OK en Redis. Renovar/verificar socket VERIFIED.',
-                  cooldown_seconds=900):
-            sent.append('prop_sim_preflight')
-    return sent
+        issues.append(('prop_sim_preflight', 'prop-sim:preflight:ok missing'))
+
+    return issues
+
+
+def _health_signature(issues):
+    return '|'.join(f'{code}:{detail}' for code, detail in issues)
+
+
+def watch_worker_health(settings, cache):
+    """One digest alert when health changes, then at most every 6h if unchanged."""
+    if cache is None or not alerts_enabled(settings):
+        return []
+    issues = collect_health_issues(settings, cache)
+    if not issues:
+        try:
+            cache.delete(HEALTH_SIGNATURE_KEY)
+        except Exception:
+            pass
+        return []
+
+    signature = _health_signature(issues)
+    digest_key = ALERT_PREFIX + HEALTH_DIGEST_KIND
+    try:
+        prev = cache.get(HEALTH_SIGNATURE_KEY)
+        if prev == signature:
+            return []
+        if prev is not None and prev != signature:
+            cache.delete(digest_key)
+    except Exception:
+        pass
+
+    lines = ['Estado del trader (paper/prop-sim):']
+    for code, detail in issues:
+        lines.append(f'- `{code}`: {detail}')
+    message = '\n'.join(lines)
+    if not notify(settings, cache, kind=HEALTH_DIGEST_KIND, message=message,
+                  cooldown_seconds=DEFAULT_COOLDOWN_SECONDS):
+        return []
+    try:
+        cache.set(HEALTH_SIGNATURE_KEY, signature)
+    except Exception:
+        pass
+    return [HEALTH_DIGEST_KIND]

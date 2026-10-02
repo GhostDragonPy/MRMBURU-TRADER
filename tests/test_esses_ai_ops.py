@@ -90,10 +90,50 @@ def test_ops_alert_dedupes_and_posts(monkeypatch):
         return {}
 
     monkeypatch.setattr(alerts, 'request_json', fake_request)
-    assert alerts.notify(cfg, cache, kind='collector_budget', message='budget dead') is True
-    assert alerts.notify(cfg, cache, kind='collector_budget', message='budget dead') is False
+    assert alerts.notify(cfg, cache, kind='trader_health', message='budget dead') is True
+    assert alerts.notify(cfg, cache, kind='trader_health', message='budget dead') is False
     assert len(calls) == 1
-    assert 'collector_budget' in calls[0][1]
+    assert 'trader_health' in calls[0][1]
+
+
+def test_health_digest_only_on_change_or_after_cooldown(monkeypatch):
+    cfg = base_settings(
+        deepseek_api_key='sk-test',
+        discord_bot_enabled=True,
+        discord_bot_token='b' * 40,
+        discord_api_key='d' * 40,
+        discord_guild_id=1,
+        discord_admin_role_id=2,
+        discord_channel_id=3,
+        discord_allowed_user_ids='9',
+    )
+    store = {}
+    cache = Mock()
+    cache.get.side_effect = lambda k: store.get(k)
+    cache.set.side_effect = lambda k, v, ex=None: store.__setitem__(k, v)
+    cache.delete.side_effect = lambda k: store.pop(k, None)
+    sent = []
+
+    def fake_notify(*a, **kw):
+        sent.append(kw.get('message', ''))
+        store[alerts.ALERT_PREFIX + kw['kind']] = '1'
+        return True
+
+    monkeypatch.setattr(alerts, 'notify', fake_notify)
+    monkeypatch.setattr(alerts, 'collect_health_issues', lambda s, c: [
+        ('paper_error', 'CTraderUnavailable'),
+    ])
+    assert alerts.watch_worker_health(cfg, cache) == ['trader_health']
+    assert len(sent) == 1
+    assert alerts.watch_worker_health(cfg, cache) == []
+    store.pop(alerts.ALERT_PREFIX + alerts.HEALTH_DIGEST_KIND)
+    assert alerts.watch_worker_health(cfg, cache) == []
+    monkeypatch.setattr(alerts, 'collect_health_issues', lambda s, c: [
+        ('collector_budget', 'budget=1000'),
+    ])
+    assert alerts.watch_worker_health(cfg, cache) == ['trader_health']
+    assert len(sent) == 2
+    assert alerts.watch_worker_health(cfg, cache) == []
 
 
 def test_ops_alert_queues_when_rest_blocked(monkeypatch):
